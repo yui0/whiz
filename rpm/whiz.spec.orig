@@ -1,0 +1,243 @@
+%define installdir /opt/whiz
+%define _build_id_links none
+
+Summary: Very Whiz Japanese Input Method Engine
+Name: whiz
+Version: 0.62
+Release: b1
+License: Distributable
+Group: System Environment/Libraries
+URL: https://berry-lab.net/whiz/whiz.html
+Source0: https://berry-lab.net/whiz/whiz-%{version}.tar.bz2
+BuildRoot: %{_tmppath}/%{name}-%{version}-buildroot
+#Prereq: /sbin/chkconfig, /etc/services, /bin/grep, /bin/cp
+Buildrequires: Canna-devel, gtk3-devel, gdk-pixbuf2-devel, gtk2-devel
+
+%description
+Whiz is a Kana-Kanji conversion server. The server is compatible with
+a cannaserver.
+
+
+## Setup Section
+%prep
+%setup -q
+./configure --prefix=%{installdir}
+#CXX="diet g++ -static" ./configure --prefix=%{installdir}
+
+## Build Section
+%build
+make
+#CXX="diet g++ -static" make
+
+## Install Section
+%install
+mkdir -p %{buildroot}%{installdir}/{bin,sbin,dic}
+
+# install whiz server
+strip server/whizserver
+install -m 755 server/whizserver %{buildroot}%{installdir}/sbin
+
+# install whiz killer
+strip server/whizkill
+install -m 755 server/whizkill %{buildroot}%{installdir}/bin
+
+# install whiz dic management
+strip makedic/whizdic
+install -m 755 makedic/whizdic %{buildroot}%{installdir}/bin
+install -m 755 makedic/whizcui %{buildroot}%{installdir}/bin
+
+# install dic
+install -m 644 dic/whiz.dic %{buildroot}%{installdir}/dic
+install -m 644 dic/whiz.inx %{buildroot}%{installdir}/dic
+install -m 644 dic/connect.dic %{buildroot}%{installdir}/dic
+install -m 644 dic/connect.inx %{buildroot}%{installdir}/dic
+install -m 644 dic/forms.dic %{buildroot}%{installdir}/dic
+install -m 644 dic/grammar.dic %{buildroot}%{installdir}/dic
+
+# for whiz.init
+mkdir -p $RPM_BUILD_ROOT/etc/rc.d/init.d
+install -m 755 rpm/whiz.init $RPM_BUILD_ROOT/etc/rc.d/init.d/whiz
+
+mkdir -p $RPM_BUILD_ROOT/etc/initng/service/
+install -m 755 rpm/whiz.i $RPM_BUILD_ROOT/etc/initng/service/whiz.i
+
+mkdir -p $RPM_BUILD_ROOT/usr/lib/systemd/system
+install -m 644 rpm/whiz.service $RPM_BUILD_ROOT/usr/lib/systemd/system/whiz.service
+
+# install whiz immodule
+mkdir -p $RPM_BUILD_ROOT%{_libdir}/gtk-2.0/immodules/
+install -m 755 immodule/.libs/gim2.so $RPM_BUILD_ROOT%{_libdir}/gtk-2.0/immodules/
+mkdir -p $RPM_BUILD_ROOT%{_libdir}/gtk-3.0/immodules/
+install -m 755 immodule/.libs/gim.so $RPM_BUILD_ROOT%{_libdir}/gtk-3.0/immodules/
+
+pushd immodule/_ng
+SOURCE="../../engine/whiz.cpp ../../debug/debug.cpp ../../jrkanji/jrkanji.cpp ../../jrkanji/whiz_conv_table.cpp"
+gcc -Wno-write-strings `pkg-config gtk+-3.0 --cflags` -I. -I../.. -Os -shared im.c ${SOURCE} -fPIC -DPIC `pkg-config gtk+-3.0 --libs` -o gim.so
+install -m 755 gim.so $RPM_BUILD_ROOT%{_libdir}/gtk-3.0/immodules/
+popd
+
+## Clean Section
+%clean
+rm -fr $RPM_BUILD_ROOT
+
+## Post, Postun & Pre, Preun Section
+#%pre
+#if  %{__grep} -q '^canna:' /etc/passwd
+#then
+#/usr/sbin/userdel canna
+#fi
+#/usr/sbin/useradd -c "Canna Service User" -r \
+#    -s /sbin/nologin -u 39 -d /var/lib/canna canna 2>/dev/null || :
+
+%post
+if ! grep -q canna /etc/services
+then
+	echo "canna		5680/tcp" >>/etc/services
+fi
+#/sbin/chkconfig --add whiz
+systemctl enable whiz
+G2=`echo /usr/bin/gtk-query-immodules-2.0-*`
+G2D=`echo /usr/lib64/gtk-2.0/2*`
+G3=`echo /usr/bin/gtk-query-immodules-3.0-*`
+G3D=`echo /usr/lib64/gtk-3.0/3*`
+$G2 > $G2D/immodules.cache
+$G3 > $G3D/immodules.cache
+
+%preun
+#if [ "$1" = "0" ]; then
+#    /sbin/service whiz stop > /dev/null 2>&1 || :
+#    /sbin/chkconfig --del whiz
+#fi
+systemctl disable whiz
+
+%postun
+#if [ "$1" -ge "1" ]; then
+#    /sbin/service whiz condrestart >/dev/null 2>&1 || :
+#fi
+
+## Files Section
+%files
+%defattr (-,root,root)
+%{installdir}/dic/*
+#%config /etc/rc.d/init.d/whiz
+#%config(noreplace) %{_sysconfdir}/initng
+/usr/lib/systemd/system/whiz.service
+%defattr (0755,bin,bin)
+%{installdir}/sbin/whizserver
+%{installdir}/bin/whizkill
+%{installdir}/bin/whizdic
+%{installdir}/bin/whizcui
+%{_libdir}/gtk-2.0/immodules/gim2.so
+%{_libdir}/gtk-3.0/immodules/gim.so
+
+
+## change log
+%changelog
+* Sat Dec 17 2022 Yuichiro Nakada <berry@berry-lab.net>
+- Update to Whiz 0.62 (Virgo)
+* Fri Jan 27 2017 Yuichiro Nakada <berry@berry-lab.net>
+- Update to Whiz 0.61 (UMa)
+* Thu Feb 12 2015 Yuichiro Nakada <berry@berry-lab.net>
+- Update to Whiz 0.60 (Lup)
+* Tue Dec 23 2014 Yuichiro Nakada <berry@berry-lab.net>
+- Update to Whiz 0.59 (CMa)
+* Sat Aug 16 2008 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.58 (Taurus)
+* Thu May 8 2008 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.57 (Eri)
+* Fri Nov 9 2007 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.56 (Hydra)
+* Fri Oct 19 2007 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.55 (Bootes)
+* Sun Apr 8 2007 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.54 (Lepus)
+* Sat Oct 14 2006 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.53 (Pisces)
+* Mon Mar 13 2006 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.52 (Indus)
+* Sat Sep 17 2005 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.51 (Delphinus)
+* Thu Aug 25 2005 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.50 (Sagittarius)
+* Sun Dec 26 2004 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.49 (Monoceros)
+* Tue Jul 27 2004 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.48 (Andromeda)
+* Wed May 5 2004 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.47 (Taw)
+* Sun Feb 29 2004 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.46 (Shin)
+* Sat Feb 21 2004 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.45 (Rehsh)
+* Tue Feb 3 2004 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.44 (Qohph)
+* Wed Jan 14 2004 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.43 (Tsadheh)
+* Thu Dec 18 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.42 (Pe)
+* Sat Dec 13 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.41 (Ayin)
+* Thu Dec 4 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.40 (Samekh)
+* Thu Nov 27 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.39 (Nun)
+* Wed Nov 19 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.38 (Mem)
+* Mon Nov 10 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.37 (Lamedh)
+* Fri Nov 7 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.36 (Kaph)
+* Thu Oct 30 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.35 (Yohdh)
+* Tue Oct 21 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.34 (Tehth)
+* Tue Oct 7 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.33 (Chehth)
+* Thu Oct 2 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.32 (Zayin)
+* Wed Sep 24 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.31 (Waw)
+* Wed Sep 17 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.30 (He)
+* Mon Sep 8 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.29 (Daleth)
+* Sat Aug 30 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.28 (Gimel)
+* Wed Aug 27 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.27 (Behth)
+* Sun Aug 17 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.26 (Aleph)
+* Thu Aug 14 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.25 (Omega)
+* Thu Aug 7 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.24 (Psi)
+* Fri Aug 1 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.23 (Chi)
+* Sun Jul 27 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.22 (Phi)
+* Sat Jul 26 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.21 (Upsilon)
+* Fri Jul 25 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.20 (Tau)
+* Mon Jul 21 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.19 (Sigma)
+* Fri Jul 18 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.18 (Rho)
+* Tue Jul 15 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.17 (Pi)
+* Fri Jul 11 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.16 (Omicron)
+* Mon Jul 7 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.15 (Xi)
+* Wed Jul 2 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.14 (Nu)
+* Mon Jun 30 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.13 (Mu)
+* Wed Jun 25 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.12 (Lambda)
+* Sat Jun 21 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.11 (Kappa)
+* Thu Jun 19 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Update to Whiz 0.10 (Iota)
+* Mon Jun 16 2003 Yuichiro Nakada <berry@po.yui.mine.nu>
+- Create for Berry Linux

@@ -1,0 +1,66 @@
+#!/bin/bash
+#
+# WHIZ for Linux
+#
+# Author: Yuichiro Nakada < yui@po.yui.mine.nu >
+# description: Whiz is a Kana-Kanji Conversion Engine.\
+#         The server is compatible with a cannaserver.
+#
+# chkconfig: 2345 90 12
+# processname: whizserver
+
+# Source function library.
+. /etc/init.d/functions
+
+#PATH=$PATH:/usr/sbin
+SERVER=/opt/whiz/sbin/whizserver
+KILLER=/opt/whiz/bin/whizkill
+prog="Whiz Server"
+
+
+[ -f $SERVER ] || exit 0
+
+start() {
+	rm -f /tmp/.iroha_unix/IROHA
+	echo -n $"Starting $prog: "
+#	initlog -c "$SERVER -syslog -u bin"
+	initlog -c "$SERVER -syslog"
+	success
+#	initlog -c cannaping && success || failure
+	RETVAL=$?
+	[ "$RETVAL" = 0 ] && touch /var/lock/subsys/whiz
+	echo
+}
+
+stop() {
+        action "Stopping $prog:" $KILLER 2> /dev/null
+        rm -f /tmp/.iroha_unix/IROHA
+        rm -f /var/lock/subsys/whiz
+}
+
+case "$1" in
+start)
+	start
+	;;
+stop)
+	stop
+	;;
+status)
+#	status whizserver
+	;;
+restart|reload)
+	stop
+	start
+	;;
+condrestart)
+	if [ -f /var/lock/subsys/whiz ]; then
+	stop
+	start
+	fi
+	;;
+*)
+	echo $"Usage: $0 {start|stop|restart|condrestart|status}"
+	exit 1
+esac
+
+exit 0

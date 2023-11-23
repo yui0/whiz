@@ -1,0 +1,7 @@
+#!/sbin/itype
+# This is a i file, used by initng parsed by install_service
+
+daemon daemon/whiz {
+	need = system/bootmisc;
+	exec daemon = /opt/whiz/sbin/whizserver -syslog;
+}

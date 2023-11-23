@@ -1,0 +1,12 @@
+[Unit]
+Description=Whiz Japanese Conversion Engine
+After=syslog.target
+
+[Service]
+#User=whiz
+Type=forking
+ExecStart=/opt/whiz/sbin/whizserver
+ExecStop=/opt/whiz/bin/whizkill
+
+[Install]
+WantedBy=multi-user.target
