@@ -14,14 +14,14 @@
 #include <gio/gio.h>
 #include <gtk/gtk.h>
 #include <gtk/gtkimmodule.h>
-#include "romaji.h"
+//#include "kana_xform.h"
 
 // -------------------------------------------------------
 // whiz ConnectNet エンジン (engine/whiz.c をインライン取込)
 // -------------------------------------------------------
 #define WHIZ_LIBRARY
 #include "engine/whiz.c"
-#include "conversion.h"
+#include "romaji.h"
 
 // モデル・辞書のパス (環境変数 WHIZ_MODEL / WHIZ_DIC で上書き可能)
 #ifndef WHIZ_MODEL_PATH
@@ -35,7 +35,8 @@
 // GTK IMモジュール定義
 // -------------------------------------------------------
 #define PROMPT_FMT                "[[ %s ]]"
-#define CONTEXT_ID                "whiz"
+#define CONTEXT_ID                "gim"
+#define CONTEXT_ID_ALIAS          "whiz"
 #define CONTEXT_NAME              "Berry Input Method (LLM)"
 
 #define IM_CONTEXT_TYPE_WHIZ      (type_whiz)
@@ -55,39 +56,7 @@
 #define MASK_CTLSFT   (GDK_SHIFT_MASK | GDK_CONTROL_MASK)
 #define MASK_NONE     0
 
-/* Hallmark · component: IME candidate popover · genre: nocturne-minimal · theme: Nocturne Violet
- * states: default · selected · composing · empty · error · inactive
- * Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 */
-static void apply_whiz_theme(void)
-{
-	static gsize initialized = 0;
-	if (!g_once_init_enter(&initialized)) return;
-
-	/* GTK4 POPUP は角丸・影をコンポジターが制御するためCSS指定は最小限に留める */
-	static const gchar css[] =
-		"popover.whiz-popup > contents { background-color: #faf8ff; border: none; }"
-		"popover.whiz-popup > arrow    { background-color: #faf8ff; border: none; }"
-		".whiz-candidates {"
-		" font-family: \"Noto Sans CJK JP\", \"Noto Sans JP\", sans-serif;"
-		" font-size: 14px; color: #1a1530; padding: 6px 8px;"
-		"}"
-		".whiz-mode {"
-		" background: #ddd5f8; color: #5a4080;"
-		" border-radius: 4px; padding: 2px 5px;"
-		" font-family: \"Noto Sans CJK JP\", \"Noto Sans JP\", sans-serif;"
-		" font-size: 11px; font-weight: 600;"
-		"}";
-	GtkCssProvider *provider = gtk_css_provider_new();
-#if GTK_CHECK_VERSION(4, 12, 0)
-	gtk_css_provider_load_from_string(provider, css);
-#else
-	gtk_css_provider_load_from_data(provider, css, -1);
-#endif
-	gtk_style_context_add_provider_for_display(gdk_display_get_default(),
-		GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-	g_object_unref(provider);
-	g_once_init_leave(&initialized, 1);
-}
+#include "im-candidate-ui.h"
 
 // -------------------------------------------------------
 // whiz エンジン初期化 (ファイルを読んで whiz_init へ渡す)
@@ -168,7 +137,7 @@ typedef struct {
 	GtkWidget   *modewin;
 	GtkWidget   *modelabel;
 	GtkWidget   *candwin;
-	GtkWidget   *candlabel;
+	WhizCandidateView candui;
 	GdkRectangle cursor_location;
 
 	// 入力中の読みバッファ (UTF-8)
@@ -188,6 +157,8 @@ typedef struct {
 	int    pred_sel;            // 選択中インデックス (-1=未選択)
 
 	gboolean ja_input_mode;
+	gboolean mode_visible;      // あ/A HUD を一時表示中
+	guint    mode_timer;
 	gboolean focus_in_candwin_show;
 } IMContextWhiz;
 
@@ -213,51 +184,44 @@ static void imcontext_move_window(IMContextWhiz *cn, GtkWidget *widget)
 }
 
 // -------------------------------------------------------
-// モードウィンドウ ("あ") の更新
+// モードウィンドウ ("あ" / "A") の更新
 // -------------------------------------------------------
 static void imcontext_update_modewin(IMContextWhiz *cn)
 {
-	if (GTK_WIDGET_VISIBLE(cn->candwin)) {
+	if (!cn->mode_visible || GTK_WIDGET_VISIBLE(cn->candwin)) {
 		gtk_popover_popdown(GTK_POPOVER(cn->modewin));
 		return;
 	}
-	if (!cn->ja_input_mode) {
-		gtk_popover_popdown(GTK_POPOVER(cn->modewin));
-		return;
-	}
-
-	const char *label = cn->converting ? "変換" : "あ";
-	gtk_label_set_label(GTK_LABEL(cn->modelabel), label);
-
+	gtk_label_set_label(GTK_LABEL(cn->modelabel), cn->ja_input_mode ? "あ" : "A");
 	imcontext_move_window(cn, cn->modewin);
 	gtk_popover_popup(GTK_POPOVER(cn->modewin));
+}
+
+static gboolean mode_timeout(gpointer data)
+{
+	IMContextWhiz *cn = data;
+	cn->mode_timer = 0;
+	cn->mode_visible = FALSE;
+	imcontext_update_modewin(cn);
+	return G_SOURCE_REMOVE;
+}
+
+/* Like Kotoeri: show the mode glyph briefly when the mode changes. */
+static void imcontext_flash_mode(IMContextWhiz *cn)
+{
+	if (cn->mode_timer) g_source_remove(cn->mode_timer);
+	cn->mode_visible = TRUE;
+	cn->mode_timer = g_timeout_add(1000, mode_timeout, cn);
+	imcontext_update_modewin(cn);
 }
 
 // -------------------------------------------------------
 // 候補ウィンドウの表示 / 非表示
 // -------------------------------------------------------
-static void imcontext_show_candwin(IMContextWhiz *cn, const gchar *candstr)
+static void imcontext_show_candwin(IMContextWhiz *cn)
 {
-	imcontext_move_window(cn, cn->candwin);
-	gtk_label_set_text(GTK_LABEL(cn->candlabel), candstr);
-
-	PangoAttrList *attrlist = pango_attr_list_new();
-	const gchar *selected = strstr(candstr, "▶ ");
-	if (selected) {
-		const gchar *line_end = strchr(selected, '\n');
-		guint sel_start = (guint)(selected - candstr);
-		guint sel_end   = line_end ? (guint)(line_end - candstr) : (guint)strlen(candstr);
-		PangoAttribute *attr = pango_attr_foreground_new(0x5F00, 0x5100, 0x7A00);
-		attr->start_index = sel_start; attr->end_index = sel_end;
-		pango_attr_list_insert(attrlist, attr);
-		attr = pango_attr_weight_new(PANGO_WEIGHT_BOLD);
-		attr->start_index = sel_start; attr->end_index = sel_end;
-		pango_attr_list_insert(attrlist, attr);
-	}
-	gtk_label_set_attributes(GTK_LABEL(cn->candlabel), attrlist);
-	pango_attr_list_unref(attrlist);
-
 	gtk_popover_popup(GTK_POPOVER(cn->candwin));
+	imcontext_move_window(cn, cn->candwin);
 	imcontext_update_modewin(cn);
 }
 
@@ -298,17 +262,9 @@ static void reset_preedit(IMContextWhiz *cn)
 static void candwin_update_predict(IMContextWhiz *cn)
 {
 	if (cn->n_pred == 0) { imcontext_hide_candwin(cn); return; }
-	gchar buf[2048];
-	int o = 0;
-	for (int i = 0; i < cn->n_pred && o + 300 < (int)sizeof(buf); i++) {
-		if (i > 0) buf[o++] = '\n';
-		if (i == cn->pred_sel)
-			o += snprintf(buf + o, sizeof(buf) - o, "▶ %s", cn->pred_words[i]);
-		else
-			o += snprintf(buf + o, sizeof(buf) - o, "  %s", cn->pred_words[i]);
-	}
-	buf[o] = '\0';
-	imcontext_show_candwin(cn, buf);
+	whiz_ui_update(&cn->candui, cn->preedit, &cn->pred_words[0][0],
+		sizeof(cn->pred_words[0]), cn->n_pred, cn->pred_sel, 0, 0);
+	imcontext_show_candwin(cn);
 }
 
 static void candwin_update_conversion(IMContextWhiz *cn)
@@ -318,20 +274,30 @@ static void candwin_update_conversion(IMContextWhiz *cn)
 		return;
 	}
 	whiz_conv_compose(cn->conversion, cn->cand, sizeof(cn->cand));
-	WhizConversionSegment *segment =
-		&cn->conversion->segments[cn->conversion->active];
-	gchar buf[4096];
-	int o = snprintf(buf, sizeof(buf), "[%d/%d]\n",
-		cn->conversion->active + 1, cn->conversion->segment_count);
-	for (int i = 0; i < segment->candidate_count &&
-	     o + WHIZ_CONV_WORD + 16 < (int)sizeof(buf); i++) {
-		o += snprintf(buf + o, sizeof(buf) - (size_t)o, "%s%s%s",
-			i == segment->selected ? "▶ " : "  ",
-			segment->candidates[i],
-			i + 1 < segment->candidate_count ? "\n" : "");
-	}
-	imcontext_show_candwin(cn, buf);
+	WhizConversionSegment *segment = &cn->conversion->segments[cn->conversion->active];
+	whiz_ui_update(&cn->candui, segment->reading, &segment->candidates[0][0],
+		sizeof(segment->candidates[0]), segment->candidate_count, segment->selected,
+		cn->conversion->active, cn->conversion->segment_count);
+	imcontext_show_candwin(cn);
 	emit_preedit(cn);
+}
+
+/* Mouse and numeric selection use the same commit path. */
+static void candidate_activate(int index, gpointer data)
+{
+	IMContextWhiz *cn = data;
+	if (cn->converting && cn->conversion->active >= 0) {
+		WhizConversionSegment *segment = &cn->conversion->segments[cn->conversion->active];
+		if (index < 0 || index >= segment->candidate_count) return;
+		whiz_conv_select_candidate(cn->conversion, index - segment->selected);
+		whiz_conv_compose(cn->conversion, cn->cand, sizeof(cn->cand));
+			whiz_conv_learn(cn->conversion);
+			g_signal_emit_by_name(cn, "commit", cn->cand);
+	} else {
+		if (index < 0 || index >= cn->n_pred) return;
+		g_signal_emit_by_name(cn, "commit", cn->pred_words[index]);
+	}
+	reset_preedit(cn);
 }
 
 // -------------------------------------------------------
@@ -371,6 +337,99 @@ static void do_convert(IMContextWhiz *cn)
 	}
 }
 
+static gboolean get_selected_text(IMContextWhiz *cn, GtkIMContext *context,
+	                              gchar **selected, gint *offset, gint *n_chars)
+{
+	*selected = NULL;
+	*offset = 0;
+	*n_chars = 0;
+	if (cn->client_widget &&
+	    (GTK_IS_PASSWORD_ENTRY(cn->client_widget) ||
+	     gtk_widget_get_ancestor(cn->client_widget, GTK_TYPE_PASSWORD_ENTRY)))
+		return FALSE;
+
+#if GTK_CHECK_VERSION(4, 2, 0)
+	gchar *surrounding = NULL;
+	gint cursor = 0, anchor = 0;
+	if (gtk_im_context_get_surrounding_with_selection(
+			context, &surrounding, &cursor, &anchor) && surrounding) {
+		gsize len = strlen(surrounding);
+		gint start = cursor < anchor ? cursor : anchor;
+		gint end = cursor > anchor ? cursor : anchor;
+		if (start >= 0 && start < end && (gsize)end <= len) {
+			*selected = g_strndup(surrounding + start, (gsize)(end - start));
+			*n_chars = (gint)g_utf8_strlen(*selected, -1);
+			*offset = start < cursor
+				? -(gint)g_utf8_strlen(surrounding + start, cursor - start)
+				: 0;
+		}
+		g_free(surrounding);
+		if (*selected && **selected) return TRUE;
+		g_clear_pointer(selected, g_free);
+	}
+#endif
+
+	/* Fallback for widgets that do not publish selection-aware surrounding
+	 * text. GtkEditable and GtkTextView cover the standard GTK editors. */
+	if (GTK_IS_EDITABLE(cn->client_widget)) {
+		gint start = 0, end = 0;
+		if (!gtk_editable_get_selection_bounds(
+				GTK_EDITABLE(cn->client_widget), &start, &end) || start == end)
+			return FALSE;
+		if (start > end) { gint swap = start; start = end; end = swap; }
+		const gchar *text = gtk_editable_get_text(GTK_EDITABLE(cn->client_widget));
+		const gchar *first = g_utf8_offset_to_pointer(text, start);
+		const gchar *last = g_utf8_offset_to_pointer(text, end);
+		*selected = g_strndup(first, (gsize)(last - first));
+		*offset = start - gtk_editable_get_position(GTK_EDITABLE(cn->client_widget));
+		*n_chars = end - start;
+		return **selected != '\0';
+	}
+	if (GTK_IS_TEXT_VIEW(cn->client_widget)) {
+		GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(cn->client_widget));
+		GtkTextIter start, end, cursor_iter;
+		if (!gtk_text_buffer_get_selection_bounds(buffer, &start, &end)) return FALSE;
+		gtk_text_buffer_get_iter_at_mark(
+			buffer, &cursor_iter, gtk_text_buffer_get_insert(buffer));
+		*selected = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+		*offset = gtk_text_iter_get_offset(&start) - gtk_text_iter_get_offset(&cursor_iter);
+		*n_chars = gtk_text_iter_get_offset(&end) - gtk_text_iter_get_offset(&start);
+		return **selected != '\0';
+	}
+	return FALSE;
+}
+
+static gboolean begin_reconversion(IMContextWhiz *cn, GtkIMContext *context)
+{
+	if (!whiz_is_ready() || cn->preedit_len > 0 || cn->romaji[0] ||
+	    cn->converting) return FALSE;
+	gchar *selected = NULL;
+	gint offset = 0, n_chars = 0;
+	if (!get_selected_text(cn, context, &selected, &offset, &n_chars))
+		return FALSE;
+
+	const char *reversed = whiz_reverse(selected);
+	gchar reading[BUFFSIZE];
+	g_strlcpy(reading, reversed ? reversed : "", sizeof(reading));
+	if (!reading[0] || !whiz_conv_begin(cn->conversion, reading) ||
+	    !gtk_im_context_delete_surrounding(context, offset, n_chars)) {
+		whiz_conv_clear(cn->conversion);
+		g_free(selected);
+		return FALSE;
+	}
+
+	g_strlcpy(cn->preedit, reading, sizeof(cn->preedit));
+	cn->preedit_len = (int)strlen(cn->preedit);
+	cn->romaji[0] = '\0';
+	cn->cand[0] = '\0';
+	cn->converting = 1;
+	cn->n_pred = 0;
+	cn->pred_sel = -1;
+	g_free(selected);
+	candwin_update_conversion(cn);
+	return TRUE;
+}
+
 // -------------------------------------------------------
 // imcontext_get_preedit_string
 // -------------------------------------------------------
@@ -405,10 +464,7 @@ static void imcontext_get_preedit_string(GtkIMContext *ic, gchar **str,
 				a->start_index = start; a->end_index = end;
 				pango_attr_list_insert(*attrs, a);
 				if (i == cn->conversion->active) {
-					a = pango_attr_background_new(0, 0, 0);
-					a->start_index = start; a->end_index = end;
-					pango_attr_list_insert(*attrs, a);
-					a = pango_attr_foreground_new(0xffff, 0xffff, 0xffff);
+					a = pango_attr_background_new(0xb300, 0xd700, 0xff00);
 					a->start_index = start; a->end_index = end;
 					pango_attr_list_insert(*attrs, a);
 				}
@@ -463,9 +519,8 @@ static void imcontext_set_cursor_location(GtkIMContext *context, GdkRectangle *a
 // -------------------------------------------------------
 static void imcontext_focus_in(GtkIMContext *context)
 {
-	IMContextWhiz *cn = IM_CONTEXT_WHIZ(context);
+	(void)IM_CONTEXT_WHIZ(context);
 	focused_context = context;
-	imcontext_update_modewin(cn);
 }
 
 static void imcontext_focus_out(GtkIMContext *context)
@@ -479,6 +534,8 @@ static void imcontext_focus_out(GtkIMContext *context)
 		g_signal_emit_by_name(cn, "commit", cn->preedit);
 		reset_preedit(cn);
 	}
+	if (cn->mode_timer) { g_source_remove(cn->mode_timer); cn->mode_timer = 0; }
+	cn->mode_visible = FALSE;
 	gtk_popover_popdown(GTK_POPOVER(cn->modewin));
 }
 
@@ -498,6 +555,45 @@ static gboolean imcontext_is_modechangekey(GtkIMContext *context,
 	return FALSE;
 }
 
+/* F6–F10 の字種変換。変換中の F6–F8 は選択中の文節だけを
+ * 置き換え、F9/F10 は元ローマ字を使って全体を確定する。 */
+static gboolean commit_xform(IMContextWhiz *cn, int mode)
+{
+	if (cn->converting) {
+		int active = cn->conversion->active;
+		if (active < 0 || active >= cn->conversion->segment_count)
+			return FALSE;
+		if (mode < WHIZ_XFORM_FW_ASCII) {
+			WhizConversionSegment *segment = &cn->conversion->segments[active];
+			gchar buf[WHIZ_CONV_WORD];
+			if (!whiz_xform_apply(mode, segment->reading, NULL,
+			                      buf, sizeof(buf))) return FALSE;
+			whiz_conv_copy(segment->candidates[0], WHIZ_CONV_WORD, buf);
+			segment->candidate_count = 1;
+			segment->selected = 0;
+			candwin_update_conversion(cn);
+			return TRUE;
+		}
+		cn->converting = 0;
+		cn->cand[0] = '\0';
+		whiz_conv_clear(cn->conversion);
+		imcontext_hide_candwin(cn);
+	}
+	if (cn->romaji[0]) {
+		whiz_romaji_convert(cn->romaji, cn->preedit,
+		                    sizeof(cn->preedit), true);
+		cn->preedit_len = (int)strlen(cn->preedit);
+	}
+	if (cn->preedit_len == 0 && !cn->romaji[0]) return FALSE;
+
+	gchar buf[BUFFSIZE];
+	if (!whiz_xform_apply(mode, cn->preedit, cn->romaji, buf, sizeof(buf)))
+		return FALSE;
+	g_signal_emit_by_name(cn, "commit", buf);
+	reset_preedit(cn);
+	return TRUE;
+}
+
 // -------------------------------------------------------
 // キーイベント処理 (メイン)
 // -------------------------------------------------------
@@ -510,6 +606,18 @@ static gboolean imcontext_filter_keypress(GtkIMContext *context, GdkEvent *event
 	const guint keyval = gdk_key_event_get_keyval(event);
 	const GdkModifierType state = gdk_event_get_modifier_state(event);
 
+	/* The dedicated conversion keys select a mode; they are not toggles. */
+	if (keyval == GDK_KEY_Henkan && !cn->ja_input_mode) {
+		cn->ja_input_mode = TRUE;
+		g_object_set_data(G_OBJECT(context), "immodule-needs-mnemonic",
+		                  (gpointer)(intptr_t)TRUE);
+		if (begin_reconversion(cn, context)) return TRUE;
+		imcontext_flash_mode(cn);
+		return TRUE;
+	}
+	if (keyval == GDK_KEY_Muhenkan && !cn->ja_input_mode)
+		return TRUE;
+
 	// --- モード切替 ---
 	if (imcontext_is_modechangekey(context, keyval, state)) {
 		cn->ja_input_mode = !cn->ja_input_mode;
@@ -518,7 +626,8 @@ static gboolean imcontext_filter_keypress(GtkIMContext *context, GdkEvent *event
 		if (!cn->ja_input_mode) {
 			if (cn->converting) {
 				whiz_conv_compose(cn->conversion, cn->cand, sizeof(cn->cand));
-				g_signal_emit_by_name(cn, "commit", cn->cand);
+			whiz_conv_learn(cn->conversion);
+			g_signal_emit_by_name(cn, "commit", cn->cand);
 			} else if (cn->preedit_len > 0) {
 				whiz_romaji_convert(cn->romaji, cn->preedit,
 				                    sizeof(cn->preedit), true);
@@ -526,7 +635,7 @@ static gboolean imcontext_filter_keypress(GtkIMContext *context, GdkEvent *event
 			}
 			reset_preedit(cn);
 		}
-		imcontext_update_modewin(cn);
+		imcontext_flash_mode(cn);
 		return TRUE;
 	}
 
@@ -543,8 +652,22 @@ static gboolean imcontext_filter_keypress(GtkIMContext *context, GdkEvent *event
 
 	// --- 日本語モード ---
 
-	// [ESC] / [無変換] → キャンセル
-	if (keyval == GDK_KEY_Escape || keyval == GDK_KEY_Muhenkan) {
+	// [F6–F10] → ひらがな / カタカナ / ｶﾀｶﾅ / 全角英数 / 半角英数
+	if (keyval >= GDK_KEY_F6 && keyval <= GDK_KEY_F10)
+		return commit_xform(cn, (int)(keyval - GDK_KEY_F6) + WHIZ_XFORM_HIRAGANA);
+
+	// [無変換] → 読みをひらがなで確定。読みなしなら英数モード
+	if (keyval == GDK_KEY_Muhenkan) {
+		if (cn->converting || cn->preedit_len > 0 || cn->romaji[0])
+			return commit_xform(cn, WHIZ_XFORM_HIRAGANA);
+		cn->ja_input_mode = FALSE;
+		g_object_set_data(G_OBJECT(context), "immodule-needs-mnemonic", NULL);
+		imcontext_flash_mode(cn);
+		return TRUE;
+	}
+
+	// [ESC] → キャンセル
+	if (keyval == GDK_KEY_Escape) {
 		if (cn->converting) {
 			cn->converting = 0;
 			cn->cand[0] = '\0';
@@ -584,6 +707,37 @@ static gboolean imcontext_filter_keypress(GtkIMContext *context, GdkEvent *event
 		return FALSE;
 	}
 
+	/* Delete edits the client text.  Never commit a conversion as a side effect. */
+	if (keyval == GDK_KEY_Delete || keyval == GDK_KEY_KP_Delete)
+		return FALSE;
+
+	/* Numeric shortcuts apply only to the visible conversion page. */
+	gunichar digit = gdk_keyval_to_unicode(keyval);
+	if (!(state & (GDK_CONTROL_MASK | GDK_ALT_MASK)) &&
+	    digit >= '0' && digit <= '9') {
+		if (cn->converting && cn->conversion->active >= 0) {
+			WhizConversionSegment *segment = &cn->conversion->segments[cn->conversion->active];
+			int index = cn->candui.first + (digit == '0' ? 9 : digit - '1');
+			if (index < segment->candidate_count) {
+				candidate_activate(index, cn);
+				return TRUE;
+			}
+		}
+		if (cn->converting && cn->cand[0]) {
+			whiz_conv_learn(cn->conversion);
+			g_signal_emit_by_name(cn, "commit", cn->cand);
+			reset_preedit(cn);
+		} else if (cn->preedit_len > 0 || cn->romaji[0]) {
+			whiz_romaji_convert(cn->romaji, cn->preedit,
+			                    sizeof(cn->preedit), true);
+			g_signal_emit_by_name(cn, "commit", cn->preedit);
+			reset_preedit(cn);
+		}
+		gchar ubuf[2] = { (gchar)digit, '\0' };
+		g_signal_emit_by_name(cn, "commit", ubuf);
+		return TRUE;
+	}
+
 	// [Return] → 確定
 	if (keyval == GDK_KEY_Return || (state & GDK_CONTROL_MASK && keyval == GDK_KEY_m)) {
 		// 予測候補が選択されていればそれをコミット
@@ -593,6 +747,7 @@ static gboolean imcontext_filter_keypress(GtkIMContext *context, GdkEvent *event
 			return TRUE;
 		}
 		if (cn->converting && cn->cand[0]) {
+			whiz_conv_learn(cn->conversion);
 			g_signal_emit_by_name(cn, "commit", cn->cand);
 			reset_preedit(cn);
 			return TRUE;
@@ -603,6 +758,25 @@ static gboolean imcontext_filter_keypress(GtkIMContext *context, GdkEvent *event
 			cn->preedit_len = strlen(cn->preedit);
 			g_signal_emit_by_name(cn, "commit", cn->preedit);
 			reset_preedit(cn);
+			return TRUE;
+		}
+		return FALSE;
+	}
+
+	/* Page keys stop at the first/last candidate, including a short last page. */
+	if (keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down) {
+		int delta = keyval == GDK_KEY_Page_Up ? -WHIZ_PAGE_SIZE : WHIZ_PAGE_SIZE;
+		if (cn->converting && cn->conversion->active >= 0) {
+			WhizConversionSegment *s = &cn->conversion->segments[cn->conversion->active];
+			int target = CLAMP(s->selected + delta, 0, s->candidate_count - 1);
+			whiz_conv_select_candidate(cn->conversion, target - s->selected);
+			candwin_update_conversion(cn);
+			return TRUE;
+		}
+		if (cn->n_pred > 0) {
+			cn->pred_sel = CLAMP(MAX(cn->pred_sel, 0) + delta, 0, cn->n_pred - 1);
+			candwin_update_predict(cn);
+			emit_preedit(cn);
 			return TRUE;
 		}
 		return FALSE;
@@ -646,17 +820,21 @@ static gboolean imcontext_filter_keypress(GtkIMContext *context, GdkEvent *event
 			candwin_update_conversion(cn);
 			return TRUE;
 		}
-		// 読みなし→全角スペース
-		g_signal_emit_by_name(cn, "commit", "\xe3\x80\x80");
+		if (keyval == GDK_KEY_Henkan && begin_reconversion(cn, context))
+			return TRUE;
+		// 読みなし: Space だけ全角スペース。変換キーは消費する。
+		if (keyval == GDK_KEY_space)
+			g_signal_emit_by_name(cn, "commit", "\xe3\x80\x80");
 		return TRUE;
 	}
 
-	// [Tab]/[Shift+Tab] → 予測候補を前後に選択。候補なしなら通常変換。
-	if (keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab) {
+	// Arrow keys and Tab select predictions without moving the client cursor.
+	if (keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab ||
+	    keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) {
 		if (cn->n_pred == 0 && cn->preedit_len > 0 && !cn->converting)
 			do_predict(cn);
 		if (cn->n_pred > 0 && !cn->converting) {
-			int backwards = keyval == GDK_KEY_ISO_Left_Tab
+			int backwards = keyval == GDK_KEY_Up || keyval == GDK_KEY_ISO_Left_Tab
 				|| (state & GDK_SHIFT_MASK);
 			if (cn->pred_sel < 0)
 				cn->pred_sel = backwards ? cn->n_pred - 1 : 0;
@@ -676,7 +854,8 @@ static gboolean imcontext_filter_keypress(GtkIMContext *context, GdkEvent *event
 
 	// 変換中に文字キー → 現在の候補を確定してから新しい文字を追加
 	if (cn->converting) {
-		g_signal_emit_by_name(cn, "commit", cn->cand);
+			whiz_conv_learn(cn->conversion);
+			g_signal_emit_by_name(cn, "commit", cn->cand);
 		reset_preedit(cn);
 	}
 
@@ -752,18 +931,16 @@ static void imcontext_init(GTypeInstance *instance, gpointer class_data)
 	cn->client_widget         = NULL;
 	cn->focus_in_candwin_show = FALSE;
 	cn->ja_input_mode         = FALSE;
+	cn->mode_visible          = FALSE;
+	cn->mode_timer            = 0;
 
 	// 候補ウィンドウ
 	cn->candwin = g_object_ref_sink(gtk_popover_new());
 	if (!cn->candwin) { g_critical("Failed to create candidate window"); return; }
 	gtk_widget_add_css_class(cn->candwin, "whiz-popup");
-	cn->candlabel = gtk_label_new("");
-	gtk_widget_add_css_class(cn->candlabel, "whiz-candidates");
-	gtk_label_set_xalign(GTK_LABEL(cn->candlabel), 0.0f);
-	gtk_label_set_yalign(GTK_LABEL(cn->candlabel), 0.0f);
-	gtk_label_set_selectable(GTK_LABEL(cn->candlabel), FALSE);
-	gtk_label_set_max_width_chars(GTK_LABEL(cn->candlabel), 24);
-	gtk_popover_set_child(GTK_POPOVER(cn->candwin), cn->candlabel);
+	whiz_ui_init(&cn->candui, candidate_activate, cn);
+	gtk_popover_set_child(GTK_POPOVER(cn->candwin), cn->candui.root);
+	gtk_popover_set_has_arrow(GTK_POPOVER(cn->candwin), FALSE);
 	gtk_popover_set_autohide(GTK_POPOVER(cn->candwin), FALSE);
 	gtk_popover_set_position(GTK_POPOVER(cn->candwin), GTK_POS_BOTTOM);
 
@@ -771,6 +948,7 @@ static void imcontext_init(GTypeInstance *instance, gpointer class_data)
 	cn->modewin = g_object_ref_sink(gtk_popover_new());
 	if (!cn->modewin) { g_critical("Failed to create mode window"); return; }
 	gtk_widget_add_css_class(cn->modewin, "whiz-popup");
+	gtk_widget_add_css_class(cn->modewin, "whiz-hud");
 	cn->modelabel = gtk_label_new("");
 	gtk_widget_add_css_class(cn->modelabel, "whiz-mode");
 	gtk_popover_set_child(GTK_POPOVER(cn->modewin), cn->modelabel);
@@ -785,6 +963,7 @@ static void imcontext_finalize(GObject *obj)
 {
 	IMContextWhiz *cn = IM_CONTEXT_WHIZ(obj);
 
+	if (cn->mode_timer) g_source_remove(cn->mode_timer);
 	g_clear_pointer(&cn->conversion, g_free);
 	set_ic_client_widget(cn, NULL);
 	g_clear_object(&cn->candwin);
@@ -834,6 +1013,8 @@ G_MODULE_EXPORT void g_io_module_load(GIOModule *module)
 	imcontext_register_type(G_TYPE_MODULE(module));
 	g_io_extension_point_implement(GTK_IM_MODULE_EXTENSION_POINT_NAME,
 		type_whiz, CONTEXT_ID, 10);
+	g_io_extension_point_implement(GTK_IM_MODULE_EXTENSION_POINT_NAME,
+		type_whiz, CONTEXT_ID_ALIAS, 10);
 }
 
 G_MODULE_EXPORT void g_io_module_unload(GIOModule *module)

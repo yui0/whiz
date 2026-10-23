@@ -1,7 +1,14 @@
 /*
+ * Copyright © 2026 Yuichiro Nakada / Project Whiz
+ *
  * Whiz input method for Wayland input-method-unstable-v2.
  * This frontend deliberately has no GTK, Qt, or GLFW dependency.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
+
 #define _GNU_SOURCE
 
 #include <EGL/egl.h>
@@ -12,6 +19,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -23,8 +31,9 @@
 
 #include "protocol/input-method-unstable-v2-client-protocol.h"
 #include "protocol/virtual-keyboard-unstable-v1-client-protocol.h"
-#include "romaji.h"
+//#include "kana_xform.h"
 
+#define LUNA_UI_NO_PLATFORM
 #define LUNA_UI_IMPLEMENTATION
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -33,10 +42,14 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #pragma GCC diagnostic ignored "-Wunused-variable"
 #endif
-#include "../luna-ui/ui/luna-ui.h"
+#include "../luna-ui/luna-ui.h"
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
+
+/* luna-ui.h declares this for native hosts.  LUNA_UI_NO_PLATFORM leaves it
+ * undefined; input widgets call it from input_mark_dirty(). */
+void luna_app_request_redraw(void) {}
 
 #define WHIZ_LIBRARY
 #define utf8_decode whiz_engine_utf8_decode
@@ -44,7 +57,7 @@
 #include "engine/whiz.c"
 #undef utf8_decode
 #undef utf8_encode
-#include "conversion.h"
+#include "romaji.h"
 
 #ifndef WHIZ_MODEL_PATH
 #define WHIZ_MODEL_PATH "/usr/share/whiz/model.wcnn"
@@ -61,8 +74,8 @@
 
 enum {
 	POPUP_WIDTH = 300, POPUP_NOTICE_HEIGHT = 96, POPUP_EMPTY_HEIGHT = 84,
-	POPUP_COMPACT_HEIGHT = 44, POPUP_CANDIDATE_BASE_HEIGHT = 97,
-	POPUP_CANDIDATE_ROW_HEIGHT = 24,
+	POPUP_COMPACT_HEIGHT = 44, POPUP_CANDIDATE_BASE_HEIGHT = 113,
+	POPUP_CANDIDATE_ROW_HEIGHT = 28, POPUP_HUD_HEIGHT = 60,
 	TEXT_CAP = 8192,
 	CAND_CAP = 20
 };
@@ -97,6 +110,8 @@ typedef struct {
 	size_t forwarded_key_count, forwarded_key_capacity;
 	char *grab_keymap;
 	uint32_t grab_keymap_size;
+	char *surrounding_text;
+	uint32_t surrounding_cursor, surrounding_anchor;
 
 	EGLDisplay egl_display;
 	EGLContext egl_context;
@@ -105,7 +120,9 @@ typedef struct {
 	struct wl_egl_window *egl_window;
 	bool luna_ready, egl_ready;
 	int popup_height;
-	bool popup_resized;
+	bool popup_resized, popup_mapped;
+	bool hud, visible;      /* Kotoeri-style あ/A flash on mode change */
+	int64_t hud_until_ms;
 
 	char reading[TEXT_CAP];
 	char romaji[TEXT_CAP];
@@ -115,7 +132,8 @@ typedef struct {
 	bool converting;
 	WhizConversion conversion;
 	int ui_panel, ui_mode, ui_reading, ui_status, ui_rule;
-	int ui_candidates, ui_empty, ui_message, ui_footer, ui_page;
+	int ui_candidates, ui_empty, ui_message, ui_footer, ui_page, ui_hint;
+	int ui_number[10];
 	int ui_cand[10], ui_word[10];
 } App;
 
@@ -227,7 +245,12 @@ static void parse_predictions(const char *raw)
 		if (!nl) break;
 		p = nl + 1;
 	}
-	app.selected = app.candidate_count ? 0 : -1;
+	/*
+	 * Predictions are suggestions, not an implicit conversion.  Keep the
+	 * reading in the preedit until the user explicitly selects a candidate;
+	 * this also makes Enter commit hiragana as expected.
+	 */
+	app.selected = -1;
 }
 
 static void predict(void)
@@ -313,18 +336,34 @@ static void set_popup_height(int height)
 	app.popup_resized = true;
 }
 
+static int64_t now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void flash_mode(void)
+{
+	app.hud = true;
+	app.hud_until_ms = now_ms() + 1000;
+}
+
 static void update_ui(void)
 {
 	if (!app.luna_ready) return;
 	const char *display;
 	if (app.converting) {
 		whiz_conv_compose(&app.conversion, app.converted, sizeof(app.converted));
-		display = app.converted;
+		display = app.conversion.active >= 0 ?
+			app.conversion.segments[app.conversion.active].reading : app.converted;
 	} else {
 		display = app.reading[0] ? app.reading :
 			(app.japanese ? "日本語入力" : "直接入力");
 	}
 	luna_set_text(app.ui_mode, app.japanese ? "あ" : "A");
+	bool hud_expired = app.hud && now_ms() >= app.hud_until_ms;
+	if (hud_expired) app.hud = false;
 	luna_set_text(app.ui_reading, display);
 	bool engine_error = !whiz_is_ready();
 	char conversion_status[32];
@@ -332,10 +371,19 @@ static void update_ui(void)
 	         app.conversion.active + 1, app.conversion.segment_count);
 	luna_set_text(app.ui_status, app.unavailable ? "UNAVAILABLE" :
 	              (engine_error ? "NO MODEL" :
-	               (app.converting ? conversion_status : "WHIZ")));
+	               (app.converting ? conversion_status : "予測")));
+	luna_set_text(app.ui_hint, app.converting ?
+		"↑↓ 選択　Enter 確定　Esc 戻る\n←→ 文節　PgUp/PgDn ページ" :
+		"↑↓ / Tab 選択　Enter 確定\nSpace 変換　Esc 戻る");
 	bool have = app.candidate_count > 0;
+	bool idle = !app.reading[0] && !have && !app.converting;
+	bool hud = app.hud && idle;
 	bool compact = !app.reading[0] && !have && !engine_error;
 	bool notice = !app.reading[0] && !have && engine_error;
+	/* Kotoeri shows the mode glyph only briefly; idle Japanese mode is invisible. */
+	app.visible = hud || (app.japanese && !compact);
+	if (hud) luna_add_class(app.ui_panel, "hud");
+	else luna_remove_class(app.ui_panel, "hud");
 	if (compact) luna_add_class(app.ui_panel, "compact");
 	else luna_remove_class(app.ui_panel, "compact");
 	if (notice) {
@@ -350,11 +398,13 @@ static void update_ui(void)
 	else luna_remove_class(app.ui_panel, "empty");
 	luna_update_element_style(app.ui_panel);
 	luna_update_element_style(app.ui_message);
-	set_hidden(app.ui_rule, compact || notice);
-	set_hidden(app.ui_footer, compact || notice || !have);
-	set_hidden(app.ui_candidates, !have);
-	set_hidden(app.ui_empty, compact || have || engine_error);
-	set_hidden(app.ui_message, !engine_error);
+	set_hidden(app.ui_reading, hud);
+	set_hidden(app.ui_status, hud);
+	set_hidden(app.ui_rule, hud || compact || notice);
+	set_hidden(app.ui_footer, hud || compact || notice || !have);
+	set_hidden(app.ui_candidates, hud || !have);
+	set_hidden(app.ui_empty, hud || compact || have || engine_error);
+	set_hidden(app.ui_message, hud || !engine_error);
 	if (!compact && !have && !engine_error)
 		luna_set_text(app.ui_empty, "候補はありません　Spaceで変換します");
 	if (engine_error)
@@ -367,6 +417,9 @@ static void update_ui(void)
 		set_hidden(app.ui_cand[row], !visible);
 		if (visible) {
 			luna_set_text(app.ui_word[row], app.candidates[ci].word);
+			char number[4] = "";
+			if (app.converting) snprintf(number, sizeof(number), "%d", (row + 1) % 10);
+			luna_set_text(app.ui_number[row], number);
 			if (ci == app.selected) luna_add_class(app.ui_cand[row], "selected");
 			else luna_remove_class(app.ui_cand[row], "selected");
 			luna_update_element_style(app.ui_cand[row]);
@@ -379,7 +432,7 @@ static void update_ui(void)
 	int visible_rows = app.candidate_count - first;
 	if (visible_rows < 1) visible_rows = 1;
 	if (visible_rows > 10) visible_rows = 10;
-	set_popup_height(compact ? POPUP_COMPACT_HEIGHT :
+	set_popup_height(hud ? POPUP_HUD_HEIGHT : compact ? POPUP_COMPACT_HEIGHT :
 	                 (notice ? POPUP_NOTICE_HEIGHT :
 	                  (have ? POPUP_CANDIDATE_BASE_HEIGHT +
 	                          visible_rows * POPUP_CANDIDATE_ROW_HEIGHT
@@ -389,7 +442,14 @@ static void update_ui(void)
 
 static void render(void)
 {
-	if (!app.egl_ready || !app.luna_ready || !app.active) return;
+	if (!app.egl_ready || !app.luna_ready) return;
+	/*
+	 * Never attach a NULL buffer: after a Mesa wl_egl_window unmap the next
+	 * swap does not reliably re-map the popup, so candidates never reappeared.
+	 * Idle is drawn as a fully transparent frame instead; the compositor
+	 * only shows input popups while a text input is active.
+	 */
+	if (!app.active) return;
 	eglMakeCurrent(app.egl_display, app.egl_surface, app.egl_surface, app.egl_context);
 	glViewport(0, 0, POPUP_WIDTH, app.popup_height);
 	glClearColor(0.f, 0.f, 0.f, 0.f);
@@ -397,9 +457,12 @@ static void render(void)
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	double now = (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
-	luna_update(now, 0.0);
-	luna_render(POPUP_WIDTH, app.popup_height);
+	if (app.visible) {
+		luna_update(now, 0.0);
+		luna_render(POPUP_WIDTH, app.popup_height);
+	}
 	eglSwapBuffers(app.egl_display, app.egl_surface);
+	app.popup_mapped = true;
 }
 
 static void refresh(void)
@@ -414,6 +477,50 @@ static void refresh(void)
 	}
 }
 
+static bool begin_reconversion(void)
+{
+	if (!app.input_method || !app.active || !whiz_is_ready() ||
+	    !app.surrounding_text || app.reading[0] || app.romaji[0] ||
+	    app.converting) return false;
+
+	size_t text_len = strlen(app.surrounding_text);
+	uint32_t start = app.surrounding_cursor < app.surrounding_anchor
+		? app.surrounding_cursor : app.surrounding_anchor;
+	uint32_t end = app.surrounding_cursor > app.surrounding_anchor
+		? app.surrounding_cursor : app.surrounding_anchor;
+	if (start == end || end > text_len || end - start >= TEXT_CAP) return false;
+
+	char selected[TEXT_CAP];
+	size_t selected_len = end - start;
+	memcpy(selected, app.surrounding_text + start, selected_len);
+	selected[selected_len] = '\0';
+	const char *reversed = whiz_reverse(selected);
+	if (!reversed || !*reversed) return false;
+
+	char reading[TEXT_CAP];
+	copy_string(reading, sizeof(reading), reversed);
+	if (!whiz_conv_begin(&app.conversion, reading)) return false;
+
+	copy_string(app.reading, sizeof(app.reading), reading);
+	app.romaji[0] = '\0';
+	app.converting = true;
+	sync_conversion_candidates();
+
+	/* Delete the selected client text and replace it with the conversion
+	 * preedit in one input-method transaction. Lengths are UTF-8 bytes. */
+	uint32_t before = app.surrounding_cursor - start;
+	uint32_t after = end - app.surrounding_cursor;
+	zwp_input_method_v2_delete_surrounding_text(app.input_method, before, after);
+	whiz_conv_compose(&app.conversion, app.converted, sizeof(app.converted));
+	int32_t cursor = (int32_t)strlen(app.converted);
+	zwp_input_method_v2_set_preedit_string(
+		app.input_method, app.converted, cursor, cursor);
+	zwp_input_method_v2_commit(app.input_method, app.serial);
+	app.surrounding_anchor = app.surrounding_cursor;
+	refresh();
+	return true;
+}
+
 static void bind_ui_ids(void)
 {
 	app.ui_panel = luna_get_element_by_id("panel");
@@ -426,12 +533,15 @@ static void bind_ui_ids(void)
 	app.ui_message = luna_get_element_by_id("message");
 	app.ui_footer = luna_get_element_by_id("footer");
 	app.ui_page = luna_get_element_by_id("page");
+	app.ui_hint = luna_get_element_by_id("hint_primary");
 	for (int i = 0; i < 10; i++) {
 		char id[16];
 		snprintf(id, sizeof(id), "cand%d", i);
 		app.ui_cand[i] = luna_get_element_by_id(id);
 		snprintf(id, sizeof(id), "word%d", i);
 		app.ui_word[i] = luna_get_element_by_id(id);
+		snprintf(id, sizeof(id), "num%d", i);
+		app.ui_number[i] = luna_get_element_by_id(id);
 	}
 }
 
@@ -495,7 +605,12 @@ static bool init_graphics(void)
 	    !eglMakeCurrent(app.egl_display, app.egl_surface,
 	                    app.egl_surface, app.egl_context)) return false;
 	eglSwapInterval(app.egl_display, 1);
-	LunaInitConfig config = { (float)POPUP_WIDTH, (float)initial_height, egl_proc };
+	LunaInitConfig config = {
+		.width = (float)POPUP_WIDTH,
+		.height = (float)initial_height,
+		.get_proc = egl_proc,
+		.frameless = 1,
+	};
 	if (!luna_init(&config)) return false;
 	char html[1024], css[1024], base[1024];
 	if (!find_ui_assets(html, sizeof(html), css, sizeof(css), base, sizeof(base))) {
@@ -636,15 +751,62 @@ static void select_relative(int delta)
 	refresh();
 }
 
+/* F6–F10: hiragana / katakana / hw-kata / fw-ascii / hw-ascii */
+static bool commit_xform(int mode)
+{
+	if (app.converting) {
+		int active = app.conversion.active;
+		if (active < 0 || active >= app.conversion.segment_count)
+			return false;
+		if (mode < WHIZ_XFORM_FW_ASCII) {
+			WhizConversionSegment *segment = &app.conversion.segments[active];
+			char buf[WHIZ_CONV_WORD];
+			if (!whiz_xform_apply(mode, segment->reading, NULL,
+			                      buf, sizeof(buf))) return false;
+			whiz_conv_copy(segment->candidates[0], WHIZ_CONV_WORD, buf);
+			segment->candidate_count = 1;
+			segment->selected = 0;
+			sync_conversion_candidates();
+			send_preedit();
+			refresh();
+			return true;
+		}
+		app.converting = false;
+		whiz_conv_clear(&app.conversion);
+	}
+	if (app.romaji[0]) resolve_final_n();
+	if (!app.reading[0] && !app.romaji[0]) return false;
+
+	char buf[TEXT_CAP];
+	if (!whiz_xform_apply(mode, app.reading, app.romaji, buf, sizeof(buf)))
+		return false;
+	commit_text(buf);
+	refresh();
+	return true;
+}
+
 static bool handle_key(xkb_keysym_t sym)
 {
+	/* The dedicated conversion keys select a mode; they are not toggles. */
+	if (sym == XKB_KEY_Henkan && !app.japanese) {
+		app.japanese = true;
+		flash_mode();
+		if (begin_reconversion()) return true;
+		refresh();
+		return true;
+	}
+	if (sym == XKB_KEY_Muhenkan && !app.japanese)
+		return true;
+
 	if (is_toggle(sym)) {
 		app.japanese = !app.japanese;
+		flash_mode();
 		if (!app.japanese) {
 			if (app.converting) {
 				whiz_conv_compose(&app.conversion, app.converted,
 				                  sizeof(app.converted));
-				commit_text(app.converted);
+			whiz_conv_learn(&app.conversion);
+			commit_text(app.converted);
 			} else if (app.reading[0]) {
 				resolve_final_n();
 				commit_text(app.reading);
@@ -655,7 +817,17 @@ static bool handle_key(xkb_keysym_t sym)
 		return true;
 	}
 	if (!app.japanese) return false;
-	if (sym == XKB_KEY_Escape || sym == XKB_KEY_Muhenkan) {
+	if (sym >= XKB_KEY_F6 && sym <= XKB_KEY_F10)
+		return commit_xform((int)(sym - XKB_KEY_F6) + WHIZ_XFORM_HIRAGANA);
+	if (sym == XKB_KEY_Muhenkan) {
+		if (app.converting || app.reading[0] || app.romaji[0])
+			return commit_xform(WHIZ_XFORM_HIRAGANA);
+		app.japanese = false;
+		flash_mode();
+		refresh();
+		return true;
+	}
+	if (sym == XKB_KEY_Escape) {
 		if (app.converting) {
 			app.converting = false;
 			whiz_conv_clear(&app.conversion);
@@ -667,6 +839,9 @@ static bool handle_key(xkb_keysym_t sym)
 		refresh();
 		return true;
 	}
+	/* Delete belongs to the client and must not commit the active conversion. */
+	if (sym == XKB_KEY_Delete || sym == XKB_KEY_KP_Delete)
+		return false;
 	if (sym == XKB_KEY_BackSpace ||
 	    (mod_active(app.ctrl_mod) && (sym == XKB_KEY_h || sym == XKB_KEY_H))) {
 		if (app.converting) {
@@ -695,6 +870,16 @@ static bool handle_key(xkb_keysym_t sym)
 		refresh();
 		return true;
 	}
+	if (sym == XKB_KEY_Page_Up || sym == XKB_KEY_Page_Down) {
+		if (!app.candidate_count) return false;
+		int current = app.selected < 0 ? 0 : app.selected;
+		int target = current + (sym == XKB_KEY_Page_Up ? -10 : 10);
+		if (target < 0) target = 0;
+		if (target >= app.candidate_count) target = app.candidate_count - 1;
+		if (app.selected < 0) app.selected = 0;
+		select_relative(target - current);
+		return true;
+	}
 	if (sym == XKB_KEY_Up) {
 		if (!app.candidate_count) predict();
 		if (app.candidate_count) { select_relative(-1); return true; }
@@ -713,27 +898,50 @@ static bool handle_key(xkb_keysym_t sym)
 		}
 		return false;
 	}
-	if (sym >= XKB_KEY_0 && sym <= XKB_KEY_9 && app.candidate_count) {
-		int row = sym == XKB_KEY_0 ? 9 : (int)(sym - XKB_KEY_1);
-		int index = app.page * 10 + row;
-		if (index < app.candidate_count) {
-			if (app.converting) {
-				app.conversion.segments[app.conversion.active].selected = index;
+	/* During conversion, the numbered rows are direct-selection shortcuts.
+	 * Outside conversion, ASCII digits remain literal input. */
+	char digit_value = '\0';
+	if (sym >= XKB_KEY_0 && sym <= XKB_KEY_9)
+		digit_value = (char)('0' + sym - XKB_KEY_0);
+	else if (sym >= XKB_KEY_KP_0 && sym <= XKB_KEY_KP_9)
+		digit_value = (char)('0' + sym - XKB_KEY_KP_0);
+	if (!mod_active(app.ctrl_mod) && !mod_active(app.alt_mod) && digit_value) {
+		if (app.converting && app.conversion.active >= 0) {
+			int row = digit_value == '0' ? 9 : digit_value - '1';
+			int candidate = app.page * 10 + row;
+			WhizConversionSegment *segment =
+				&app.conversion.segments[app.conversion.active];
+			if (candidate < segment->candidate_count) {
+				whiz_conv_select_candidate(
+					&app.conversion, candidate - segment->selected);
 				whiz_conv_compose(&app.conversion, app.converted,
 				                  sizeof(app.converted));
-				commit_text(app.converted);
-			} else {
-				commit_text(app.candidates[index].word);
+			whiz_conv_learn(&app.conversion);
+			commit_text(app.converted);
+				refresh();
+				return true;
 			}
-			refresh();
-			return true;
 		}
+		char digit[2] = { digit_value, '\0' };
+		if (app.converting) {
+			whiz_conv_compose(&app.conversion, app.converted,
+			                  sizeof(app.converted));
+			whiz_conv_learn(&app.conversion);
+			commit_text(app.converted);
+		} else if (app.reading[0] || app.romaji[0]) {
+			resolve_final_n();
+			commit_text(app.reading);
+		}
+		commit_text(digit);
+		refresh();
+		return true;
 	}
 	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter ||
 	    (mod_active(app.ctrl_mod) && (sym == XKB_KEY_m || sym == XKB_KEY_M))) {
 		if (app.converting) {
 			whiz_conv_compose(&app.conversion, app.converted,
 			                  sizeof(app.converted));
+			whiz_conv_learn(&app.conversion);
 			commit_text(app.converted);
 		} else if (app.selected >= 0 && app.selected < app.candidate_count)
 			commit_text(app.candidates[app.selected].word);
@@ -746,7 +954,10 @@ static bool handle_key(xkb_keysym_t sym)
 	}
 	if (sym == XKB_KEY_space || sym == XKB_KEY_Henkan) {
 		if (!app.reading[0]) {
-			commit_text("　");
+			if (sym == XKB_KEY_Henkan && begin_reconversion())
+				return true;
+			if (sym == XKB_KEY_space)
+				commit_text("　");
 		} else if (!app.converting) {
 			convert_reading();
 			send_preedit();
@@ -764,7 +975,8 @@ static bool handle_key(xkb_keysym_t sym)
 	if (n <= 1) return false;
 	if (app.converting) {
 		whiz_conv_compose(&app.conversion, app.converted, sizeof(app.converted));
-		commit_text(app.converted);
+			whiz_conv_learn(&app.conversion);
+			commit_text(app.converted);
 	}
 	if (n == 2 && ((utf8[0] >= 'A' && utf8[0] <= 'Z') ||
 	              (utf8[0] >= 'a' && utf8[0] <= 'z') ||
@@ -889,7 +1101,17 @@ static void input_deactivate(void *data, struct zwp_input_method_v2 *object)
 static void input_surrounding(void *data, struct zwp_input_method_v2 *object,
 	const char *text, uint32_t cursor, uint32_t anchor)
 {
-	(void)data; (void)object; (void)text; (void)cursor; (void)anchor;
+	(void)data; (void)object;
+	free(app.surrounding_text);
+	app.surrounding_text = NULL;
+	app.surrounding_cursor = app.surrounding_anchor = 0;
+	if (!text) return;
+	size_t len = strlen(text);
+	if (cursor > len || anchor > len) return;
+	app.surrounding_text = strdup(text);
+	if (!app.surrounding_text) return;
+	app.surrounding_cursor = cursor;
+	app.surrounding_anchor = anchor;
 }
 
 static void input_cause(void *data, struct zwp_input_method_v2 *object, uint32_t cause)
@@ -922,14 +1144,15 @@ static void input_done(void *data, struct zwp_input_method_v2 *object)
 				app.keyboard, &keyboard_listener, &app);
 		}
 		if (app.surface && !app.egl_ready && !init_graphics()) {
-			fprintf(stderr, "whiz-im-wayland: EGL/Luna initialization failed (EGL 0x%x)\n",
+			fprintf(stderr,
+			        "whiz-im-wayland: popup UI unavailable (EGL 0x%x); keyboard IME continues\n",
 			        eglGetError());
-			app.running = false;
 		}
 		refresh();
 	} else if (!app.pending_active && app.active) {
 		app.active = false;
 		reset_composition();
+		render();
 		/*
 		 * Keep both role objects. The compositor makes the popup inert while
 		 * inactive; recreating its role on this wl_surface is invalid.
@@ -1038,6 +1261,7 @@ static void cleanup(void)
 	xkb_context_unref(app.xkb_context);
 	free(app.forwarded_keys);
 	free(app.grab_keymap);
+	free(app.surrounding_text);
 	if (whiz_is_ready()) whiz_free();
 	if (app.display) wl_display_disconnect(app.display);
 }
@@ -1048,12 +1272,17 @@ static int run_self_test(void)
 		const char *romaji;
 		const char *hiragana;
 	} cases[] = {
-		{ "konnichiha", "こんにちは" },
+		{ "konnnichiha", "こんにちは" },
+		{ "hanni", "はんい" },
+		{ "han'i", "はんい" },
+		{ "hanxi", "はんい" },
 		{ "gakkou", "がっこう" },
 		{ "nyuuryoku", "にゅうりょく" },
 		{ "kanpai", "かんぱい" },
 		{ "shashinn", "しゃしん" },
-		{ "nna", "\u3093\u306a" },
+		{ "nna", "\u3093\u3042" },
+		{ "nnna", "\u3093\u306a" },
+		{ "n'na", "\u3093\u306a" },
 		{ "kan", "\u304b\u3093" },
 		{ "thi", "\u3066\u3043" },
 		{ "vu", "\u3094" },
@@ -1111,7 +1340,25 @@ int main(int argc, char **argv)
 		cleanup();
 		return EXIT_FAILURE;
 	}
-	while (app.running && wl_display_dispatch(app.display) >= 0) {}
+	while (app.running) {
+		/* Poll so the mode HUD can expire without further input. */
+		while (wl_display_prepare_read(app.display) != 0)
+			if (wl_display_dispatch_pending(app.display) < 0) { app.running = false; break; }
+		if (!app.running) break;
+		wl_display_flush(app.display);
+		struct pollfd pfd = { wl_display_get_fd(app.display), POLLIN, 0 };
+		int timeout = -1;
+		if (app.hud) {
+			int64_t left = app.hud_until_ms - now_ms();
+			timeout = left > 0 ? (int)left : 0;
+		}
+		int n = poll(&pfd, 1, timeout);
+		if (n > 0) wl_display_read_events(app.display);
+		else wl_display_cancel_read(app.display);
+		if (n < 0 && errno != EINTR) break;
+		if (wl_display_dispatch_pending(app.display) < 0) break;
+		if (app.hud && now_ms() >= app.hud_until_ms) refresh();
+	}
 	bool failed = app.unavailable || app.running;
 	cleanup();
 	return failed ? EXIT_FAILURE : EXIT_SUCCESS;

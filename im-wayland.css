@@ -1,31 +1,31 @@
-/* Hallmark · component: IME candidate popover · genre: nocturne-minimal · theme: Nocturne Violet
- * states: default · selected · composing · empty · loading · error · inactive
- * contrast: pass · Hallmark pre-emit critique: P5 H5 E5 S5 R5 V5 */
+/* Hallmark · component: IME candidate popover · tone: utilitarian · accent: blue
+ * States follow the input method: composing, selected, empty, error, inactive.
+ * Fixed popup geometry is shared with im-wayland.c. No animation during typing. */
 :root {
-  --color-paper: rgba(250, 248, 255, 0.97);
-  --color-paper-raised: #f0ecff;
-  --color-paper-selected: #ede0ff;
-  --color-ink: #1a1530;
-  --color-muted: #5a5072;
-  --color-faint: #8878a2;
-  --color-accent: #7c5cbf;
-  --color-accent-light: #c4b5fd;
+  --color-paper: #fbfbfc;
+  --color-paper-raised: #f3f4f6;
+  --color-paper-selected: #0a64ff;
+  --color-ink: #1d1d1f;
+  --color-muted: #86868b;
+  --color-faint: #86868b;
+  --color-accent: #0a64ff;
+  --color-accent-light: #dbe9fb;
   --color-accent-ink: #ffffff;
-  --color-rule: rgba(80, 60, 120, 0.13);
+  --color-rule: #d2d2d7;
   --color-danger: #b03060;
   --color-danger-rule: rgba(176, 48, 96, 0.3);
-  --color-shadow-near: rgba(25, 12, 64, 0.10);
-  --color-shadow: rgba(25, 12, 64, 0.20);
+  --color-shadow-near: rgba(0, 0, 0, 0.08);
+  --color-shadow: rgba(0, 0, 0, 0.12);
   --color-transparent: rgba(0, 0, 0, 0);
-  --font-display: "JetBrains Mono", "Noto Sans Mono CJK JP", monospace;
-  --font-body: "Noto Sans CJK JP", "Noto Sans JP", sans-serif;
+  --font-display: "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans JP", sans-serif;
+  --font-body: "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans JP", sans-serif;
   --space-2xs: 4px;
   --space-xs: 8px;
   --space-sm: 12px;
   --radius-key: 5px;
-  --radius-row: 8px;
+  --radius-row: 6px;
   --radius-badge: 8px;
-  --radius-panel: 14px;
+  --radius-panel: 10px;
 }
 
 html, body {
@@ -49,7 +49,7 @@ html, body {
   border-radius: var(--radius-panel);
   background: var(--color-paper);
   color: var(--color-ink);
-  box-shadow: 0 2px 6px var(--color-shadow-near), 0 14px 36px var(--color-shadow);
+  box-shadow: 0 2px 4px var(--color-shadow-near), 0 4px 8px var(--color-shadow);
 }
 
 #panel.compact {
@@ -84,22 +84,22 @@ html, body {
 
 #mode_badge {
   height: 20px;
-  border-radius: 4px;
-  background: #ddd5f8;
-  color: #5a4080;
-  font-size: 11px;
-  font-weight: 600;
+  border-radius: 5px;
+  background: #2c2c2e;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 500;
   text-align: center;
   padding: 2px 6px;
   box-sizing: border-box;
 }
 
 #reading {
-  width: 172px;
+  width: 152px;
   height: 24px;
   color: var(--color-ink);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 400;
   line-height: 20px;
   padding-top: 2px;
   box-sizing: border-box;
@@ -108,16 +108,15 @@ html, body {
 }
 
 #panel.compact #reading {
-  width: 180px;
+  width: 160px;
 }
 
 #status {
-  width: 56px;
+  width: 76px;
   height: 20px;
   color: var(--color-faint);
   font-family: var(--font-display);
-  font-size: 9px;
-  letter-spacing: 1.2px;
+  font-size: 11px;
   text-align: right;
   padding-top: var(--space-2xs);
   box-sizing: border-box;
@@ -139,7 +138,7 @@ html, body {
 
 .candidate {
   width: 272px;
-  height: 24px;
+  height: 28px;
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -150,7 +149,7 @@ html, body {
 
 .candidate.selected {
   background: var(--color-paper-selected);
-  color: var(--color-ink);
+  color: var(--color-accent-ink);
   border-left: 2px solid var(--color-accent);
 }
 
@@ -161,12 +160,12 @@ html, body {
   margin-right: var(--space-xs);
   padding-top: 2px;
   box-sizing: border-box;
-  border: 1px solid var(--color-rule);
+  border: 1px solid var(--color-transparent);
   border-radius: var(--radius-key);
   color: var(--color-faint);
   font-family: var(--font-display);
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 400;
   text-align: center;
 }
 
@@ -178,19 +177,19 @@ html, body {
 
 .word {
   width: 238px;
-  height: 23px;
+  height: 27px;
   padding-top: 2px;
   box-sizing: border-box;
   color: var(--color-ink);
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 400;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
 .selected .word {
-  font-weight: 700;
-  color: #1a1530;
+  font-weight: 400;
+  color: var(--color-accent-ink);
 }
 
 #empty, #message {
@@ -220,7 +219,7 @@ html, body {
 
 #footer {
   width: 272px;
-  height: 28px;
+  height: 44px;
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -230,13 +229,14 @@ html, body {
 
 #hint_primary {
   width: 220px;
-  height: 24px;
-  padding-top: 7px;
+  height: 40px;
+  padding-top: 4px;
   box-sizing: border-box;
   color: var(--color-faint);
   font-family: var(--font-display);
-  font-size: 9px;
-  letter-spacing: 0.3px;
+  font-size: 11px;
+  line-height: 17px;
+  white-space: pre-line;
 }
 
 #page {
@@ -253,4 +253,31 @@ html, body {
 
 .hidden {
   display: none !important;
+}
+
+/* Mode flash (あ / A), shown briefly on mode change like Kotoeri. */
+#panel.hud {
+  width: 52px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: #2c2c2e;
+}
+
+#panel.hud #header {
+  width: 52px;
+  height: 48px;
+  justify-content: center;
+}
+
+#panel.hud #mode_badge {
+  width: 52px;
+  height: 48px;
+  padding: 0;
+  background: var(--color-transparent);
+  color: #ffffff;
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 48px;
 }

@@ -1,7 +1,14 @@
 /*
- * Shared UTF-8 romaji-to-hiragana conversion for every Whiz frontend.
- * The rules are based on the legacy whiz_romakana_typing_rule table.
+ * Copyright © 2026 Yuichiro Nakada / Project Whiz
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ *
+ * Shared input and segmented-conversion helpers for every Whiz frontend.
+ * Romaji rules are based on the legacy whiz_romakana_typing_rule table.
  */
+
 #ifndef WHIZ_ROMAJI_H
 #define WHIZ_ROMAJI_H
 
@@ -107,33 +114,43 @@ static inline void whiz_romaji_convert(const char *input, char *out, size_t cap,
 			continue;
 		}
 		if (c == 'n') {
-			char after = input[i + 2];
-			if (after >= 'A' && after <= 'Z') after = (char)(after - 'A' + 'a');
 			if (next == '\'') {
-				/* n' \u2192 \u3093 (2 chars) */
+				/* n' → ん (2 chars). Bare ' is a separator only. */
 				if (!whiz_romaji_append(out, cap, &used, "\u3093", strlen("\u3093"))) break;
 				i += 2;
 				continue;
 			}
 			if (next == 'n') {
-				/* "nn" \u306f\u5e38\u306b\u3093\u4e00\u6587\u5b57\u3002
-				 * after \u304c\u6bcd\u97f3/y \u306a\u3089\u6b21\u306e n \u304b\u3089\u65b0\u97f3\u7bc0\u3092\u59cb\u3081\u308b\u305f\u3081 1 \u6587\u5b57\u6d88\u8cbb
-				 * (\u4f8b: nna\u2192\u3093\u306a, nnya\u2192\u3093\u306b\u3083)\u3002
-				 * \u305d\u308c\u4ee5\u5916(\u5b50\u97f3\u30fb\u672b\u5c3e)\u306f nn \u3092\u4e00\u62ec\u6d88\u8cbb\u3057\u30662\u6587\u5b57\u9032\u3080
-				 * (\u4f8b: nnk\u2192\u3093+k, nn$\u2192\u3093)\u3002 */
-				bool after_starts_syllable = after &&
-					(strchr("aeiou", after) || after == 'y');
+				/* nn → ん always (consume both). Vowels after stay independent:
+				 * hanni→はんい, nna→んあ. んな is nnna / n'na; こんにちは is konnnichiha. */
 				if (!whiz_romaji_append(out, cap, &used, "\u3093", strlen("\u3093"))) break;
-				i += after_starts_syllable ? 1 : 2;
+				i += 2;
+				continue;
+			}
+			if (next == 'x') {
+				/* nx → ん (Sharp / some IME terminator; hanxi→はんい) */
+				if (!whiz_romaji_append(out, cap, &used, "\u3093", strlen("\u3093"))) break;
+				i += 2;
 				continue;
 			}
 			if ((next && next != 'y' && !strchr("aeiou", next)) ||
 			    (!next && final_n)) {
-				/* n \u306e\u76f4\u5f8c\u304c\u5b50\u97f3\u3001\u307e\u305f\u306f\u672b\u5c3e (final_n=true) \u2192 \u3093 */
+				/* n before consonant, or trailing n (final_n=true) → ん */
 				if (!whiz_romaji_append(out, cap, &used, "\u3093", strlen("\u3093"))) break;
 				i++;
 				continue;
 			}
+		}
+		/* xn → ん (Mozc alternative to nn) */
+		if (c == 'x' && next == 'n') {
+			if (!whiz_romaji_append(out, cap, &used, "\u3093", strlen("\u3093"))) break;
+			i += 2;
+			continue;
+		}
+		/* Lone apostrophe is only a romaji separator; skip it. */
+		if (c == '\'') {
+			i++;
+			continue;
 		}
 
 		const WhizRomajiRule *best = NULL;
@@ -185,5 +202,507 @@ static inline bool whiz_romaji_backspace_kana(char *input, char *out, size_t cap
 	} while (n);
 	return true;
 }
+
+/*
+ * Shared UTF-8 kana / alphanumeric transforms for Whiz F6–F10 keys.
+ *   F6  → ひらがな
+ *   F7  → カタカナ
+ *   F8  → ｶﾀｶﾅ
+ *   F9  → ｋａｔａｋａｎａ (full-width latin)
+ *   F10 → katakana (half-width latin)
+ */
+
+#include <stdint.h>
+
+enum {
+	WHIZ_XFORM_HIRAGANA = 6,
+	WHIZ_XFORM_KATAKANA = 7,
+	WHIZ_XFORM_HW_KATA  = 8,
+	WHIZ_XFORM_FW_ASCII = 9,
+	WHIZ_XFORM_HW_ASCII = 10
+};
+
+static inline bool whiz_xform_append(char *out, size_t cap, size_t *used,
+	const char *text, size_t bytes)
+{
+	if (*used + bytes >= cap) return false;
+	memcpy(out + *used, text, bytes);
+	*used += bytes;
+	out[*used] = '\0';
+	return true;
+}
+
+static inline bool whiz_xform_put_cp(char *out, size_t cap, size_t *used,
+	uint32_t cp)
+{
+	char buf[4];
+	size_t n;
+	if (cp < 0x80U) {
+		buf[0] = (char)cp;
+		n = 1;
+	} else if (cp < 0x800U) {
+		buf[0] = (char)(0xc0U | (cp >> 6));
+		buf[1] = (char)(0x80U | (cp & 0x3fU));
+		n = 2;
+	} else if (cp < 0x10000U) {
+		buf[0] = (char)(0xe0U | (cp >> 12));
+		buf[1] = (char)(0x80U | ((cp >> 6) & 0x3fU));
+		buf[2] = (char)(0x80U | (cp & 0x3fU));
+		n = 3;
+	} else {
+		buf[0] = (char)(0xf0U | (cp >> 18));
+		buf[1] = (char)(0x80U | ((cp >> 12) & 0x3fU));
+		buf[2] = (char)(0x80U | ((cp >> 6) & 0x3fU));
+		buf[3] = (char)(0x80U | (cp & 0x3fU));
+		n = 4;
+	}
+	return whiz_xform_append(out, cap, used, buf, n);
+}
+
+static inline uint32_t whiz_xform_decode(const char *s, size_t *adv)
+{
+	unsigned char c0 = (unsigned char)s[0];
+	if (c0 < 0x80U) {
+		*adv = 1;
+		return c0;
+	}
+	if ((c0 & 0xe0U) == 0xc0U && (unsigned char)s[1]) {
+		*adv = 2;
+		return ((uint32_t)(c0 & 0x1fU) << 6) |
+		       ((uint32_t)((unsigned char)s[1] & 0x3fU));
+	}
+	if ((c0 & 0xf0U) == 0xe0U && (unsigned char)s[1] && (unsigned char)s[2]) {
+		*adv = 3;
+		return ((uint32_t)(c0 & 0x0fU) << 12) |
+		       ((uint32_t)((unsigned char)s[1] & 0x3fU) << 6) |
+		       ((uint32_t)((unsigned char)s[2] & 0x3fU));
+	}
+	if ((c0 & 0xf8U) == 0xf0U && (unsigned char)s[1] &&
+	    (unsigned char)s[2] && (unsigned char)s[3]) {
+		*adv = 4;
+		return ((uint32_t)(c0 & 0x07U) << 18) |
+		       ((uint32_t)((unsigned char)s[1] & 0x3fU) << 12) |
+		       ((uint32_t)((unsigned char)s[2] & 0x3fU) << 6) |
+		       ((uint32_t)((unsigned char)s[3] & 0x3fU));
+	}
+	*adv = 1;
+	return c0;
+}
+
+/*
+ * Half-width for U+30A1..U+30F3 in Unicode order
+ * (ァアィイゥウ… interleaved; voiced = base + dakuten).
+ */
+static const char *const whiz_hw_kata_base[] = {
+	/* 30A1 ァ */ "\xef\xbd\xa7", /* 30A2 ア */ "\xef\xbd\xb1",
+	/* 30A3 ィ */ "\xef\xbd\xa8", /* 30A4 イ */ "\xef\xbd\xb2",
+	/* 30A5 ゥ */ "\xef\xbd\xa9", /* 30A6 ウ */ "\xef\xbd\xb3",
+	/* 30A7 ェ */ "\xef\xbd\xaa", /* 30A8 エ */ "\xef\xbd\xb4",
+	/* 30A9 ォ */ "\xef\xbd\xab", /* 30AA オ */ "\xef\xbd\xb5",
+	/* 30AB カ */ "\xef\xbd\xb6", /* 30AC ガ */ "\xef\xbd\xb6\xef\xbe\x9e",
+	/* 30AD キ */ "\xef\xbd\xb7", /* 30AE ギ */ "\xef\xbd\xb7\xef\xbe\x9e",
+	/* 30AF ク */ "\xef\xbd\xb8", /* 30B0 グ */ "\xef\xbd\xb8\xef\xbe\x9e",
+	/* 30B1 ケ */ "\xef\xbd\xb9", /* 30B2 ゲ */ "\xef\xbd\xb9\xef\xbe\x9e",
+	/* 30B3 コ */ "\xef\xbd\xba", /* 30B4 ゴ */ "\xef\xbd\xba\xef\xbe\x9e",
+	/* 30B5 サ */ "\xef\xbd\xbb", /* 30B6 ザ */ "\xef\xbd\xbb\xef\xbe\x9e",
+	/* 30B7 シ */ "\xef\xbd\xbc", /* 30B8 ジ */ "\xef\xbd\xbc\xef\xbe\x9e",
+	/* 30B9 ス */ "\xef\xbd\xbd", /* 30BA ズ */ "\xef\xbd\xbd\xef\xbe\x9e",
+	/* 30BB セ */ "\xef\xbd\xbe", /* 30BC ゼ */ "\xef\xbd\xbe\xef\xbe\x9e",
+	/* 30BD ソ */ "\xef\xbd\xbf", /* 30BE ゾ */ "\xef\xbd\xbf\xef\xbe\x9e",
+	/* 30BF タ */ "\xef\xbe\x80", /* 30C0 ダ */ "\xef\xbe\x80\xef\xbe\x9e",
+	/* 30C1 チ */ "\xef\xbe\x81", /* 30C2 ヂ */ "\xef\xbe\x81\xef\xbe\x9e",
+	/* 30C3 ッ */ "\xef\xbd\xaf", /* 30C4 ツ */ "\xef\xbe\x82",
+	/* 30C5 ヅ */ "\xef\xbe\x82\xef\xbe\x9e",
+	/* 30C6 テ */ "\xef\xbe\x83", /* 30C7 デ */ "\xef\xbe\x83\xef\xbe\x9e",
+	/* 30C8 ト */ "\xef\xbe\x84", /* 30C9 ド */ "\xef\xbe\x84\xef\xbe\x9e",
+	/* 30CA ナ */ "\xef\xbe\x85", /* 30CB ニ */ "\xef\xbe\x86",
+	/* 30CC ヌ */ "\xef\xbe\x87", /* 30CD ネ */ "\xef\xbe\x88",
+	/* 30CE ノ */ "\xef\xbe\x89",
+	/* 30CF ハ */ "\xef\xbe\x8a", /* 30D0 バ */ "\xef\xbe\x8a\xef\xbe\x9e",
+	/* 30D1 パ */ "\xef\xbe\x8a\xef\xbe\x9f",
+	/* 30D2 ヒ */ "\xef\xbe\x8b", /* 30D3 ビ */ "\xef\xbe\x8b\xef\xbe\x9e",
+	/* 30D4 ピ */ "\xef\xbe\x8b\xef\xbe\x9f",
+	/* 30D5 フ */ "\xef\xbe\x8c", /* 30D6 ブ */ "\xef\xbe\x8c\xef\xbe\x9e",
+	/* 30D7 プ */ "\xef\xbe\x8c\xef\xbe\x9f",
+	/* 30D8 ヘ */ "\xef\xbe\x8d", /* 30D9 ベ */ "\xef\xbe\x8d\xef\xbe\x9e",
+	/* 30DA ペ */ "\xef\xbe\x8d\xef\xbe\x9f",
+	/* 30DB ホ */ "\xef\xbe\x8e", /* 30DC ボ */ "\xef\xbe\x8e\xef\xbe\x9e",
+	/* 30DD ポ */ "\xef\xbe\x8e\xef\xbe\x9f",
+	/* 30DE マ */ "\xef\xbe\x8f", /* 30DF ミ */ "\xef\xbe\x90",
+	/* 30E0 ム */ "\xef\xbe\x91", /* 30E1 メ */ "\xef\xbe\x92",
+	/* 30E2 モ */ "\xef\xbe\x93",
+	/* 30E3 ャ */ "\xef\xbd\xac", /* 30E4 ヤ */ "\xef\xbe\x94",
+	/* 30E5 ュ */ "\xef\xbd\xad", /* 30E6 ユ */ "\xef\xbe\x95",
+	/* 30E7 ョ */ "\xef\xbd\xae", /* 30E8 ヨ */ "\xef\xbe\x96",
+	/* 30E9 ラ */ "\xef\xbe\x97", /* 30EA リ */ "\xef\xbe\x98",
+	/* 30EB ル */ "\xef\xbe\x99", /* 30EC レ */ "\xef\xbe\x9a",
+	/* 30ED ロ */ "\xef\xbe\x9b",
+	/* 30EE ヮ */ "\xef\xbe\x9c", /* 30EF ワ */ "\xef\xbe\x9c",
+	/* 30F0 ヰ */ "\xef\xbd\xb2", /* 30F1 ヱ */ "\xef\xbd\xb4",
+	/* 30F2 ヲ */ "\xef\xbd\xa6", /* 30F3 ン */ "\xef\xbe\x9d"
+};
+_Static_assert(sizeof(whiz_hw_kata_base) / sizeof(whiz_hw_kata_base[0]) == 83,
+	"half-width katakana table must cover U+30A1..U+30F3");
+
+static inline uint32_t whiz_xform_hw_to_fw_kata(uint32_t cp)
+{
+	/* U+FF66..U+FF9D → full-width katakana (dakuten/handakuten kept) */
+	static const uint32_t hw2fw[] = {
+		0x30f2,0x30a1,0x30a3,0x30a5,0x30a7,0x30a9,0x30e3,0x30e5,
+		0x30e7,0x30c3,0x30fc,0x30a2,0x30a4,0x30a6,0x30a8,0x30aa,
+		0x30ab,0x30ad,0x30af,0x30b1,0x30b3,0x30b5,0x30b7,0x30b9,
+		0x30bb,0x30bd,0x30bf,0x30c1,0x30c4,0x30c6,0x30c8,0x30ca,
+		0x30cb,0x30cc,0x30cd,0x30ce,0x30cf,0x30d2,0x30d5,0x30d8,
+		0x30db,0x30de,0x30df,0x30e0,0x30e1,0x30e2,0x30e4,0x30e6,
+		0x30e8,0x30e9,0x30ea,0x30eb,0x30ec,0x30ed,0x30ef,0x30f3,
+		0x309b,0x309c
+	};
+	if (cp >= 0xff66U && cp <= 0xff9fU)
+		return hw2fw[cp - 0xff66U];
+	return cp;
+}
+
+static inline uint32_t whiz_xform_to_hiragana_cp(uint32_t cp)
+{
+	if (cp >= 0x30a1U && cp <= 0x30f6U) return cp - 0x60U;
+	if (cp == 0x30fcU) return cp;
+	if (cp >= 0xff66U && cp <= 0xff9fU) {
+		uint32_t fw = whiz_xform_hw_to_fw_kata(cp);
+		if (fw >= 0x30a1U && fw <= 0x30f6U) return fw - 0x60U;
+		return fw;
+	}
+	if (cp >= 0xff01U && cp <= 0xff5eU) return cp - 0xfee0U;
+	if (cp == 0x3000U) return ' ';
+	return cp;
+}
+
+static inline uint32_t whiz_xform_to_katakana_cp(uint32_t cp)
+{
+	cp = whiz_xform_to_hiragana_cp(cp);
+	if (cp >= 0x3041U && cp <= 0x3096U) return cp + 0x60U;
+	return cp;
+}
+
+static inline bool whiz_xform_put_hw_kata(char *out, size_t cap, size_t *used,
+	uint32_t cp)
+{
+	cp = whiz_xform_to_katakana_cp(cp);
+	if (cp >= 0x30a1U && cp <= 0x30f3U) {
+		const char *s = whiz_hw_kata_base[cp - 0x30a1U];
+		return whiz_xform_append(out, cap, used, s, strlen(s));
+	}
+	if (cp == 0x30fcU) /* ー */
+		return whiz_xform_append(out, cap, used, "\xef\xbd\xb0", 3);
+	if (cp == 0x30fbU) /* ・ */
+		return whiz_xform_append(out, cap, used, "\xef\xbd\xa5", 3);
+	if (cp == 0x3001U) /* 、 */
+		return whiz_xform_append(out, cap, used, "\xef\xbd\xa4", 3);
+	if (cp == 0x3002U) /* 。 */
+		return whiz_xform_append(out, cap, used, "\xef\xbd\xa1", 3);
+	return whiz_xform_put_cp(out, cap, used, cp);
+}
+
+static inline bool whiz_xform_put_fw_ascii(char *out, size_t cap, size_t *used,
+	uint32_t cp)
+{
+	if (cp == ' ') return whiz_xform_put_cp(out, cap, used, 0x3000U);
+	if (cp >= 0x21U && cp <= 0x7eU)
+		return whiz_xform_put_cp(out, cap, used, cp + 0xfee0U);
+	return whiz_xform_put_cp(out, cap, used, cp);
+}
+
+static inline const char *whiz_xform_latin_source(const char *reading,
+	const char *romaji)
+{
+	if (romaji && romaji[0]) return romaji;
+	return reading ? reading : "";
+}
+
+/*
+ * Apply F6–F10 style transform.
+ * reading: current kana reading (UTF-8)
+ * romaji:  original latin buffer (may be empty)
+ */
+static inline bool whiz_xform_apply(int mode, const char *reading,
+	const char *romaji, char *out, size_t cap)
+{
+	if (!out || !cap) return false;
+	out[0] = '\0';
+	const char *src;
+	size_t used = 0;
+
+	switch (mode) {
+	case WHIZ_XFORM_HW_ASCII:
+		src = whiz_xform_latin_source(reading, romaji);
+		if (!src[0]) return false;
+		for (size_t i = 0; src[i]; ) {
+			size_t adv = 0;
+			uint32_t cp = whiz_xform_decode(src + i, &adv);
+			cp = whiz_xform_to_hiragana_cp(cp);
+			if (cp >= 0x80U) {
+				if (!whiz_xform_put_cp(out, cap, &used, cp)) break;
+			} else {
+				char c = (char)cp;
+				if (!whiz_xform_append(out, cap, &used, &c, 1)) break;
+			}
+			i += adv;
+		}
+		return used > 0;
+
+	case WHIZ_XFORM_FW_ASCII:
+		src = whiz_xform_latin_source(reading, romaji);
+		if (!src[0]) return false;
+		for (size_t i = 0; src[i]; ) {
+			size_t adv = 0;
+			uint32_t cp = whiz_xform_decode(src + i, &adv);
+			cp = whiz_xform_to_hiragana_cp(cp);
+			if (!whiz_xform_put_fw_ascii(out, cap, &used, cp)) break;
+			i += adv;
+		}
+		return used > 0;
+
+	case WHIZ_XFORM_HIRAGANA:
+	case WHIZ_XFORM_KATAKANA:
+	case WHIZ_XFORM_HW_KATA:
+		src = (reading && reading[0]) ? reading :
+		      (romaji && romaji[0] ? romaji : "");
+		if (!src[0]) return false;
+		for (size_t i = 0; src[i]; ) {
+			size_t adv = 0;
+			uint32_t cp = whiz_xform_decode(src + i, &adv);
+			if (mode == WHIZ_XFORM_HIRAGANA) {
+				if (!whiz_xform_put_cp(out, cap, &used,
+				                       whiz_xform_to_hiragana_cp(cp)))
+					break;
+			} else if (mode == WHIZ_XFORM_KATAKANA) {
+				if (!whiz_xform_put_cp(out, cap, &used,
+				                       whiz_xform_to_katakana_cp(cp)))
+					break;
+			} else {
+				if (!whiz_xform_put_hw_kata(out, cap, &used, cp)) break;
+			}
+			i += adv;
+		}
+		return used > 0;
+
+	default:
+		return false;
+	}
+}
+
+/* Shared segmented conversion state and operations. */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+#define WHIZ_CONV_SEGMENTS 64
+#define WHIZ_CONV_CANDIDATES 20
+#define WHIZ_CONV_WORD 256
+#define WHIZ_CONV_READING 256
+
+typedef struct {
+	char reading[WHIZ_CONV_READING];
+	char candidates[WHIZ_CONV_CANDIDATES][WHIZ_CONV_WORD];
+	int candidate_count;
+	int selected;
+} WhizConversionSegment;
+
+typedef struct {
+	WhizConversionSegment segments[WHIZ_CONV_SEGMENTS];
+	int segment_count;
+	int active;
+} WhizConversion;
+
+static inline void whiz_conv_clear(WhizConversion *conversion)
+{
+	memset(conversion, 0, sizeof(*conversion));
+	conversion->active = -1;
+}
+
+static inline void whiz_conv_copy(char *dst, size_t cap, const char *src)
+{
+	if (!cap) return;
+	if (!src) src = "";
+	size_t n = strlen(src);
+	if (n >= cap) n = cap - 1;
+	memmove(dst, src, n);
+	dst[n] = '\0';
+}
+
+static inline bool whiz_conv_has_candidate(
+	const WhizConversionSegment *segment, const char *word)
+{
+	for (int i = 0; i < segment->candidate_count; i++)
+		if (!strcmp(segment->candidates[i], word)) return true;
+	return false;
+}
+
+static inline void whiz_conv_load_candidates(
+	WhizConversionSegment *segment, const char *preferred)
+{
+	segment->candidate_count = 0;
+	segment->selected = 0;
+	if (preferred && *preferred) {
+		whiz_conv_copy(segment->candidates[segment->candidate_count++],
+		               WHIZ_CONV_WORD, preferred);
+	}
+
+	const char *raw_api = whiz_segment_candidates(
+		segment->reading, WHIZ_CONV_CANDIDATES);
+	char raw[4096];
+	whiz_conv_copy(raw, sizeof(raw), raw_api);
+	char *line = raw;
+	while (*line && segment->candidate_count < WHIZ_CONV_CANDIDATES) {
+		char *newline = strchr(line, '\n');
+		if (newline) *newline = '\0';
+		if (*line && !whiz_conv_has_candidate(segment, line))
+			whiz_conv_copy(segment->candidates[segment->candidate_count++],
+			               WHIZ_CONV_WORD, line);
+		if (!newline) break;
+		line = newline + 1;
+	}
+	if (!segment->candidate_count)
+		whiz_conv_copy(segment->candidates[segment->candidate_count++],
+		               WHIZ_CONV_WORD, segment->reading);
+}
+
+static inline bool whiz_conv_begin(WhizConversion *conversion, const char *reading)
+{
+	whiz_conv_clear(conversion);
+	const char *raw_api = whiz_convert_segments(reading);
+	if (!raw_api || !*raw_api) return false;
+	char raw[4096];
+	whiz_conv_copy(raw, sizeof(raw), raw_api);
+
+	char *line = raw;
+	while (*line && conversion->segment_count < WHIZ_CONV_SEGMENTS) {
+		char *newline = strchr(line, '\n');
+		if (newline) *newline = '\0';
+		char *tab = strchr(line, '\t');
+		if (tab && tab != line && tab[1]) {
+			*tab = '\0';
+			WhizConversionSegment *segment =
+				&conversion->segments[conversion->segment_count++];
+			whiz_conv_copy(segment->reading, sizeof(segment->reading), tab + 1);
+			whiz_conv_load_candidates(segment, line);
+		}
+		if (!newline) break;
+		line = newline + 1;
+	}
+	conversion->active = conversion->segment_count ? 0 : -1;
+	return conversion->segment_count > 0;
+}
+
+static inline const char *whiz_conv_selected(const WhizConversionSegment *segment)
+{
+	return segment->candidate_count
+		? segment->candidates[segment->selected] : segment->reading;
+}
+
+static inline void whiz_conv_compose(
+	const WhizConversion *conversion, char *out, size_t cap)
+{
+	size_t used = 0;
+	if (!cap) return;
+	out[0] = '\0';
+	for (int i = 0; i < conversion->segment_count; i++) {
+		const char *word = whiz_conv_selected(&conversion->segments[i]);
+		size_t n = strlen(word);
+		if (n >= cap - used) n = cap - used - 1;
+		memcpy(out + used, word, n);
+		used += n;
+		out[used] = '\0';
+		if (used + 1 >= cap) break;
+	}
+}
+
+/* Remember the committed choice of every segment (see whiz_learn in engine/whiz.c). */
+static inline void whiz_conv_learn(const WhizConversion *conversion)
+{
+	for (int i = 0; i < conversion->segment_count; i++) {
+		const WhizConversionSegment *segment = &conversion->segments[i];
+		whiz_learn(segment->reading, whiz_conv_selected(segment));
+	}
+}
+
+static inline void whiz_conv_select_segment(WhizConversion *conversion, int delta)
+{
+	if (!conversion->segment_count) return;
+	conversion->active =
+		(conversion->active + delta + conversion->segment_count)
+		% conversion->segment_count;
+}
+
+static inline void whiz_conv_select_candidate(WhizConversion *conversion, int delta)
+{
+	if (conversion->active < 0) return;
+	WhizConversionSegment *segment = &conversion->segments[conversion->active];
+	if (!segment->candidate_count) return;
+	segment->selected =
+		(segment->selected + delta + segment->candidate_count)
+		% segment->candidate_count;
+}
+
+static inline size_t whiz_conv_first_char_bytes(const char *text)
+{
+	unsigned char c = (unsigned char)text[0];
+	if (c < 0x80) return c ? 1 : 0;
+	if ((c & 0xe0) == 0xc0) return 2;
+	if ((c & 0xf0) == 0xe0) return 3;
+	if ((c & 0xf8) == 0xf0) return 4;
+	return 1;
+}
+
+static inline size_t whiz_conv_last_char_offset(const char *text)
+{
+	size_t n = strlen(text);
+	if (!n) return 0;
+	size_t p = n - 1;
+	while (p && ((unsigned char)text[p] & 0xc0) == 0x80) p--;
+	return p;
+}
+
+/*
+ * Resize the boundary after the active segment. Negative shortens it,
+ * positive takes one character from the following segment.
+ */
+static inline bool whiz_conv_resize(WhizConversion *conversion, int delta)
+{
+	int i = conversion->active;
+	if (i < 0 || i + 1 >= conversion->segment_count || !delta) return false;
+	WhizConversionSegment *left = &conversion->segments[i];
+	WhizConversionSegment *right = &conversion->segments[i + 1];
+	char moved[8] = "";
+	if (delta < 0) {
+		size_t p = whiz_conv_last_char_offset(left->reading);
+		if (!p) return false; /* Keep at least one character in each segment. */
+		whiz_conv_copy(moved, sizeof(moved), left->reading + p);
+		left->reading[p] = '\0';
+		char joined[WHIZ_CONV_READING];
+		snprintf(joined, sizeof(joined), "%s%s", moved, right->reading);
+		whiz_conv_copy(right->reading, sizeof(right->reading), joined);
+	} else {
+		size_t n = whiz_conv_first_char_bytes(right->reading);
+		if (!n || !right->reading[n]) return false;
+		memcpy(moved, right->reading, n);
+		moved[n] = '\0';
+		if (strlen(left->reading) + n >= sizeof(left->reading)) return false;
+		strcat(left->reading, moved);
+		memmove(right->reading, right->reading + n,
+		        strlen(right->reading + n) + 1);
+	}
+	const char *best = whiz_convert(left->reading);
+	char left_best[WHIZ_CONV_WORD];
+	whiz_conv_copy(left_best, sizeof(left_best), best);
+	best = whiz_convert(right->reading);
+	char right_best[WHIZ_CONV_WORD];
+	whiz_conv_copy(right_best, sizeof(right_best), best);
+	whiz_conv_load_candidates(left, left_best);
+	whiz_conv_load_candidates(right, right_best);
+	return true;
+}
+
 
 #endif

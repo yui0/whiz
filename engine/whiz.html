@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WHIZ — かな漢字</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Zen+Old+Mincho:wght@500;700;900&display=swap" rel="stylesheet">
+<style>
+/* Hallmark · pre-emit critique: P5 H4 E5 S4 R5 V4 · theme: Mist Garden */
+:root {
+  --color-paper:   oklch(96.5% 0.012 165);
+  --color-paper-2: oklch(93.5% 0.016 165);
+  --color-ink:     oklch(22% 0.028 160);
+  --color-muted:   oklch(48% 0.018 160);
+  --color-rule:    oklch(84% 0.014 165);
+  --color-accent:  oklch(42% 0.09 155);
+  --color-focus:   oklch(48% 0.11 155);
+  --color-ok:      oklch(48% 0.1 155);
+  --color-err:     oklch(48% 0.14 25);
+  --font-display:  "Zen Old Mincho", "Hiragino Mincho ProN", serif;
+  --font-body:     "Zen Kaku Gothic New", "Hiragino Sans", sans-serif;
+  --ease-out:      cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html, body {
+  overflow-x: clip;
+  min-height: 100%;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  min-height: 100vh;
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-weight: 400;
+  background:
+    radial-gradient(120% 80% at 10% -10%, oklch(94% 0.03 145 / 0.9), transparent 55%),
+    radial-gradient(90% 70% at 100% 0%, oklch(93% 0.025 190 / 0.7), transparent 50%),
+    linear-gradient(165deg, var(--color-paper) 0%, var(--color-paper-2) 100%);
+  background-attachment: fixed;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.045;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  z-index: 0;
+}
+
+.shell {
+  position: relative;
+  z-index: 1;
+  width: min(100% - 2rem, 40rem);
+  margin: 0 auto;
+  padding: clamp(2.5rem, 8vh, 5rem) 0 4rem;
+}
+
+.brand {
+  animation: rise 0.9s var(--ease-out) both;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.85rem;
+}
+
+.brand-mark .seal {
+  width: 0.55rem;
+  height: 0.55rem;
+  background: var(--color-accent);
+  transform: rotate(12deg);
+  animation: seal-in 0.7s var(--ease-out) 0.15s both;
+}
+
+.brand-mark span {
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+.brand h1 {
+  font-family: var(--font-display);
+  font-style: normal;
+  font-weight: 900;
+  font-size: clamp(3.2rem, 12vw, 5.4rem);
+  line-height: 0.95;
+  letter-spacing: 0.04em;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  color: var(--color-ink);
+  animation: brand-settle 1.1s var(--ease-out) both;
+}
+
+.brand p {
+  margin-top: 1.1rem;
+  max-width: 22rem;
+  font-size: 0.95rem;
+  line-height: 1.7;
+  color: var(--color-muted);
+  animation: rise 0.9s var(--ease-out) 0.12s both;
+}
+
+.status {
+  margin-top: 2rem;
+  display: grid;
+  gap: 0.55rem;
+  animation: rise 0.9s var(--ease-out) 0.2s both;
+}
+
+.status-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.status-row strong {
+  font-weight: 500;
+  color: var(--color-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.ink-track {
+  height: 2px;
+  background: var(--color-rule);
+  overflow: hidden;
+}
+
+.ink-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--color-accent);
+  transition: width 0.25s var(--ease-out);
+}
+
+.stage {
+  margin-top: 2.4rem;
+  animation: rise 0.9s var(--ease-out) 0.28s both;
+}
+
+label.field-label {
+  display: block;
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  color: var(--color-muted);
+  margin-bottom: 0.65rem;
+}
+
+.field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: stretch;
+  border-bottom: 1px solid var(--color-rule);
+  padding-bottom: 0.55rem;
+  transition: border-color 0.2s;
+}
+
+.field:focus-within { border-color: var(--color-accent); }
+
+#kana-input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: clamp(1.15rem, 3.5vw, 1.45rem);
+  font-weight: 500;
+  line-height: 1.4;
+  padding: 0.35rem 0;
+}
+
+#kana-input::placeholder { color: oklch(70% 0.02 165); }
+#kana-input:disabled { opacity: 0.45; }
+
+#conv-btn {
+  appearance: none;
+  border: 1px solid var(--color-ink);
+  background: var(--color-ink);
+  color: var(--color-paper);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  padding: 0 1.15rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, transform 0.12s;
+  white-space: nowrap;
+}
+
+#conv-btn:hover:not(:disabled) {
+  background: transparent;
+  color: var(--color-ink);
+}
+
+#conv-btn:active:not(:disabled) { transform: translateY(1px); }
+#conv-btn:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 3px;
+}
+#conv-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* 予測変換チップ */
+.predict-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem 0.48rem;
+  margin-top: 0.85rem;
+  min-height: 1.6rem;
+}
+
+.pred-chip {
+  appearance: none;
+  border: 1px solid var(--color-rule);
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  padding: 0.18rem 0.72rem;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.pred-chip:hover {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-paper);
+}
+
+.pred-chip.active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-paper);
+  transform: translateY(-1px);
+}
+
+.pred-chip:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.result {
+  margin-top: 1.75rem;
+  min-height: 4.5rem;
+}
+
+.result-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 0.45rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  color: var(--color-muted);
+}
+
+#result-text {
+  font-family: var(--font-display);
+  font-style: normal;
+  font-weight: 700;
+  font-size: clamp(1.55rem, 5vw, 2.35rem);
+  line-height: 1.45;
+  letter-spacing: 0.04em;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  color: var(--color-ink);
+  opacity: 0.35;
+  transform: translateY(0.4rem);
+  transition: opacity 0.45s var(--ease-out), transform 0.45s var(--ease-out), color 0.2s;
+}
+
+#result-text.filled {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+#result-text.error { color: var(--color-err); opacity: 1; transform: none; }
+
+#copy-btn {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--color-accent);
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+
+#copy-btn.visible { opacity: 1; pointer-events: auto; }
+#copy-btn:hover { text-decoration: underline; text-underline-offset: 3px; }
+#copy-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
+
+/* 逆変換セクション */
+.reverse-stage {
+  margin-top: 2.2rem;
+  animation: rise 0.9s var(--ease-out) 0.32s both;
+}
+
+.reverse-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  border-bottom: 1px solid var(--color-rule);
+  padding-bottom: 0.55rem;
+  transition: border-color 0.2s;
+}
+
+.reverse-field:focus-within { border-color: var(--color-accent); }
+
+#kanji-input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  font-size: clamp(1.05rem, 3.2vw, 1.35rem);
+  font-weight: 700;
+  line-height: 1.4;
+  padding: 0.35rem 0;
+  letter-spacing: 0.04em;
+}
+
+#kanji-input::placeholder { color: oklch(70% 0.02 165); font-weight: 400; font-family: var(--font-body); }
+#kanji-input:disabled { opacity: 0.45; }
+
+#reverse-text {
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: clamp(1.1rem, 3.2vw, 1.45rem);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  color: var(--color-ink);
+  opacity: 0.35;
+  transition: opacity 0.35s var(--ease-out);
+}
+
+#reverse-text.filled { opacity: 1; }
+
+.samples {
+  margin-top: 2.5rem;
+  animation: rise 0.9s var(--ease-out) 0.36s both;
+}
+
+.samples h2 {
+  font-family: var(--font-body);
+  font-style: normal;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  color: var(--color-muted);
+  margin-bottom: 0.85rem;
+}
+
+.sample-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 0.7rem;
+}
+
+.sample {
+  appearance: none;
+  border: 0;
+  border-bottom: 1px solid var(--color-rule);
+  background: transparent;
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  padding: 0.2rem 0;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.sample:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.sample:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 3px;
+}
+
+.sample:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.foot {
+  margin-top: 3.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--color-rule);
+  font-size: 0.72rem;
+  line-height: 1.8;
+  color: var(--color-muted);
+  animation: rise 0.9s var(--ease-out) 0.42s both;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(0.8rem); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes brand-settle {
+  from { opacity: 0; letter-spacing: 0.18em; transform: translateY(0.6rem); }
+  to   { opacity: 1; letter-spacing: 0.04em; transform: none; }
+}
+
+@keyframes seal-in {
+  from { opacity: 0; transform: rotate(12deg) scale(0.4); }
+  to   { opacity: 1; transform: rotate(12deg) scale(1); }
+}
+
+@media (max-width: 414px) {
+  .field { grid-template-columns: 1fr; }
+  #conv-btn { width: 100%; min-height: 2.75rem; }
+}
+</style>
+</head>
+<body>
+  <main class="shell">
+    <header class="brand">
+      <div class="brand-mark">
+        <i class="seal" aria-hidden="true"></i>
+        <span>ConnectNet · WASM</span>
+      </div>
+      <h1>WHIZ</h1>
+      <p>最長一致の格子と連接ネットで、ひらがなを漢字交じり文に。すべてブラウザ内で動きます。</p>
+    </header>
+
+    <div class="status" aria-live="polite">
+      <div class="status-row">
+        <span id="status-text">準備中…</span>
+        <strong id="status-pct"></strong>
+      </div>
+      <div class="ink-track"><div class="ink-bar" id="ink-bar"></div></div>
+    </div>
+
+    <section class="stage">
+      <label class="field-label" for="kana-input">よみ → 変換</label>
+      <div class="field">
+        <input id="kana-input" type="text" inputmode="text" autocomplete="off"
+               placeholder="きょうはいいてんきです" disabled
+               oninput="updatePredict()" onkeydown="handleKanaKey(event)"
+               aria-controls="predict-panel" aria-autocomplete="list">
+        <button id="conv-btn" type="button" onclick="convert()" disabled>変換</button>
+      </div>
+
+      <!-- 予測変換チップ -->
+      <div class="predict-panel" id="predict-panel" aria-live="polite" aria-label="予測候補"></div>
+
+      <div class="result">
+        <div class="result-meta">
+          <span>結果</span>
+          <span>
+            <span id="timing"></span>
+            <button id="copy-btn" type="button" onclick="copyResult()">コピー</button>
+          </span>
+        </div>
+        <div id="result-text">—</div>
+      </div>
+    </section>
+
+    <!-- 逆変換セクション -->
+    <section class="reverse-stage">
+      <label class="field-label" for="kanji-input">漢字 → よみ（逆変換）</label>
+      <div class="reverse-field">
+        <input id="kanji-input" type="text" inputmode="text" autocomplete="off"
+               placeholder="東京に行きます" disabled oninput="reverseInput()">
+      </div>
+      <div class="result" style="min-height:3rem">
+        <div class="result-meta"><span>読み</span></div>
+        <div id="reverse-text">—</div>
+      </div>
+    </section>
+
+    <section class="samples">
+      <h2>試す</h2>
+      <div class="sample-list" id="sample-list"></div>
+    </section>
+
+    <footer class="foot">
+      辞書とモデルは端末上で読み込みます。入力は外部に送られません。<br>
+      whiz · whiz.dic lattice + ConnectNet · 予測変換 / 逆変換対応
+    </footer>
+  </main>
+
+<script>
+var Module = {
+  print: function (t) { console.log('[whiz]', t); },
+  printErr: function (t) { console.warn('[whiz]', t); },
+  onRuntimeInitialized: function () {
+    boot();
+  }
+};
+</script>
+<script src="whiz.js"></script>
+<script>
+var SAMPLES = [
+  ['きょうはいいてんきです', '今日はいい天気です'],
+  ['わたしはがくせいです', '私は学生です'],
+  ['とうきょうにいきます', '東京に行きます'],
+  ['こんにちは', 'こんにちは'],
+  ['あしたはあめです', '明日は雨です'],
+  ['にほんごをべんきょうします', '日本語を勉強します']
+];
+
+function setStatus(msg, pct) {
+  document.getElementById('status-text').textContent = msg;
+  var el = document.getElementById('status-pct');
+  var bar = document.getElementById('ink-bar');
+  if (pct == null || pct < 0) {
+    el.textContent = '';
+    bar.style.width = '0%';
+  } else {
+    el.textContent = Math.round(pct) + '%';
+    bar.style.width = Math.min(100, pct) + '%';
+  }
+}
+
+function setReadyUI(ok) {
+  document.getElementById('kana-input').disabled = !ok;
+  document.getElementById('conv-btn').disabled = !ok;
+  document.getElementById('kanji-input').disabled = !ok;
+  document.querySelectorAll('.sample').forEach(function (b) { b.disabled = !ok; });
+  if (ok) document.getElementById('kana-input').focus();
+}
+
+async function fetchBuf(url, onPct) {
+  var resp = await fetch(url);
+  if (!resp.ok) throw new Error(url + ' HTTP ' + resp.status);
+  var total = parseInt(resp.headers.get('content-length') || '0', 10);
+  var reader = resp.body.getReader();
+  var chunks = [];
+  var received = 0;
+  while (true) {
+    var step = await reader.read();
+    if (step.done) break;
+    chunks.push(step.value);
+    received += step.value.length;
+    if (total && onPct) onPct(received / total);
+  }
+  var buf = new Uint8Array(received);
+  var off = 0;
+  for (var i = 0; i < chunks.length; i++) {
+    buf.set(chunks[i], off);
+    off += chunks[i].length;
+  }
+  return buf;
+}
+
+async function boot() {
+  renderSamples();
+  try {
+    setStatus('辞書を読み込み中…', 0);
+    var dic = await fetchBuf('whiz.web.dic', function (p) { setStatus('辞書を読み込み中…', p * 55); });
+    setStatus('モデルを読み込み中…', 55);
+    var model = await fetchBuf('model.wcnn', function (p) { setStatus('モデルを読み込み中…', 55 + p * 40); });
+    setStatus('初期化中…', 96);
+    await new Promise(function (r) { setTimeout(r, 20); });
+
+    var mPtr = Module._malloc(model.byteLength);
+    var dPtr = Module._malloc(dic.byteLength);
+    if (!mPtr || !dPtr) throw new Error('malloc failed');
+    Module.HEAPU8.set(model, mPtr);
+    Module.HEAPU8.set(dic, dPtr);
+    var ok = Module._whiz_init(mPtr, model.byteLength, dPtr, dic.byteLength);
+    Module._free(mPtr);
+    Module._free(dPtr);
+    if (!ok) throw new Error('whiz_init failed');
+
+    setStatus('準備完了', 100);
+    setTimeout(function () { setStatus('準備完了', -1); }, 600);
+    setReadyUI(true);
+  } catch (e) {
+    console.error(e);
+    setStatus('読み込みエラー: ' + e.message, -1);
+    setReadyUI(false);
+  }
+}
+
+function convert() {
+  if (!Module._whiz_is_ready || !Module._whiz_is_ready()) return;
+  var kana = document.getElementById('kana-input').value.trim();
+  if (!kana) return;
+
+  var result = document.getElementById('result-text');
+  var copyBtn = document.getElementById('copy-btn');
+  var timing = document.getElementById('timing');
+  result.className = '';
+  result.textContent = '…';
+  copyBtn.className = '';
+  timing.textContent = '';
+
+  setTimeout(function () {
+    var enc = new TextEncoder();
+    var bytes = enc.encode(kana + '\0');
+    var ptr = Module._malloc(bytes.length);
+    Module.HEAPU8.set(bytes, ptr);
+    var t0 = performance.now();
+    var resPtr = Module._whiz_convert(ptr);
+    Module._free(ptr);
+    var ms = (performance.now() - t0).toFixed(1);
+
+    if (resPtr) {
+      var text = Module.UTF8ToString(resPtr);
+      result.textContent = text;
+      result.className = 'filled';
+      copyBtn.className = 'visible';
+      timing.textContent = ms + ' ms · ';
+    } else {
+      result.textContent = '変換できませんでした';
+      result.className = 'error';
+      timing.textContent = ms + ' ms · ';
+    }
+  }, 10);
+}
+
+function copyResult() {
+  var text = document.getElementById('result-text').textContent;
+  navigator.clipboard.writeText(text).then(function () {
+    var btn = document.getElementById('copy-btn');
+    btn.textContent = 'コピー済み';
+    setTimeout(function () { btn.textContent = 'コピー'; }, 1200);
+  });
+}
+
+function renderSamples() {
+  var root = document.getElementById('sample-list');
+  root.innerHTML = SAMPLES.map(function (pair, i) {
+    return '<button type="button" class="sample" disabled onclick="useSample(' + i + ')">' +
+      esc(pair[0]) + '</button>';
+  }).join('');
+}
+
+function useSample(i) {
+  document.getElementById('kana-input').value = SAMPLES[i][0];
+  updatePredict();
+  convert();
+}
+
+function esc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/* ── 予測変換 ───────────────────────────────────────── */
+
+var _predictTimer = null;
+var _predictCands = [];
+var _predictSel = -1;
+
+function updatePredict() {
+  clearTimeout(_predictTimer);
+  _predictSel = -1;
+  _predictTimer = setTimeout(_doPredict, 80);
+}
+
+function _doPredict() {
+  var kana = document.getElementById('kana-input').value.trim();
+  var panel = document.getElementById('predict-panel');
+  if (!kana || !Module._whiz_is_ready || !Module._whiz_is_ready()) {
+    panel.innerHTML = '';
+    _predictCands = [];
+    _predictSel = -1;
+    return;
+  }
+  _predictCands = _callPredict(kana, 12);
+  if (_predictSel >= _predictCands.length) _predictSel = -1;
+  renderPredict();
+}
+
+function renderPredict() {
+  var panel = document.getElementById('predict-panel');
+  panel.innerHTML = _predictCands.map(function (c, i) {
+    var active = i === _predictSel;
+    return '<button type="button" class="pred-chip' + (active ? ' active' : '') +
+      '" onclick="usePredict(' + i + ')" title="' + esc(c.read) +
+      '" role="option" aria-selected="' + active + '">' + esc(c.word) + '</button>';
+  }).join('');
+}
+
+function previewPredict(i) {
+  if (i < 0 || i >= _predictCands.length) return;
+  _predictSel = i;
+  renderPredict();
+  var result = document.getElementById('result-text');
+  result.textContent = _predictCands[i].word;
+  result.className = 'filled';
+  document.getElementById('copy-btn').className = 'visible';
+  document.getElementById('timing').textContent = 'Tabで選択 · Enterで確定 · ';
+}
+
+function usePredict(i) {
+  if (i >= _predictCands.length) return;
+  previewPredict(i);
+  document.getElementById('timing').textContent = '';
+}
+
+function handleKanaKey(event) {
+  if (event.key === 'Tab') {
+    clearTimeout(_predictTimer);
+    _doPredict();
+    if (_predictCands.length) {
+      event.preventDefault();
+      var step = event.shiftKey ? -1 : 1;
+      var next = _predictSel < 0
+        ? (step > 0 ? 0 : _predictCands.length - 1)
+        : (_predictSel + step + _predictCands.length) % _predictCands.length;
+      previewPredict(next);
+    } else if (!event.shiftKey && event.target.value.trim()) {
+      event.preventDefault();
+      convert();
+    }
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    if (_predictSel >= 0) usePredict(_predictSel);
+    else convert();
+  } else if (event.key === 'Escape' && _predictSel >= 0) {
+    event.preventDefault();
+    _predictSel = -1;
+    renderPredict();
+  }
+}
+
+function _callPredict(prefix, maxCands) {
+  var enc = new TextEncoder();
+  var bytes = enc.encode(prefix + '\0');
+  var ptr = Module._malloc(bytes.length);
+  Module.HEAPU8.set(bytes, ptr);
+  var resPtr = Module._whiz_predict(ptr, maxCands || 10);
+  Module._free(ptr);
+  if (!resPtr) return [];
+  return Module.UTF8ToString(resPtr).split('\n').map(function (line) {
+    var tab = line.indexOf('\t');
+    return tab >= 0 ? { word: line.slice(0, tab), read: line.slice(tab + 1) } : null;
+  }).filter(Boolean);
+}
+
+/* ── 逆変換（漢字→よみ） ─────────────────────────────── */
+
+var _reverseTimer = null;
+
+function reverseInput() {
+  clearTimeout(_reverseTimer);
+  _reverseTimer = setTimeout(_doReverse, 80);
+}
+
+function _doReverse() {
+  var text = document.getElementById('kanji-input').value.trim();
+  var out  = document.getElementById('reverse-text');
+  if (!text || !Module._whiz_is_ready || !Module._whiz_is_ready()) {
+    out.textContent = '—';
+    out.className = '';
+    return;
+  }
+  var enc = new TextEncoder();
+  var bytes = enc.encode(text + '\0');
+  var ptr = Module._malloc(bytes.length);
+  Module.HEAPU8.set(bytes, ptr);
+  var resPtr = Module._whiz_reverse(ptr);
+  Module._free(ptr);
+  if (resPtr) {
+    out.textContent = Module.UTF8ToString(resPtr);
+    out.className = 'filled';
+  } else {
+    out.textContent = '—';
+    out.className = '';
+  }
+}
+</script>
+</body>
+</html>
